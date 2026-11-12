@@ -1298,6 +1298,93 @@ static void t_env_time(channel_t *ch)
     env = (env_t){ .intensity = 256 };
 }
 
+static void t_time_cmp(channel_t *ch)
+{
+    char e[DSL_ERR_LEN];
+    env = (env_t){ .year = 2026, .month = 11, .day = 12, .hour = 18, .minute = 30, .second = 15, .timeset = 1, .intensity = 256 };
+    /* minute precision: "18:30" is the whole minute, so gt/eq/lt never overlap */
+    CHECK(dsl_true(ch, "(time-eq \"18:30\")"));
+    CHECK(!dsl_true(ch, "(time-gt \"18:30\")") && dsl_true(ch, "(time-ge \"18:30\")"));
+    CHECK(!dsl_true(ch, "(time-lt \"18:30\")") && dsl_true(ch, "(time-le \"18:30\")"));
+    CHECK(dsl_true(ch, "(time-gt \"18:29\")") && dsl_true(ch, "(time-lt \"18:31\")"));
+    CHECK(dsl_true(ch, "(time-gt \"8:30\")") && dsl_true(ch, "(time-gt \"08:30\")"));
+    /* second precision */
+    CHECK(dsl_true(ch, "(time-eq \"18:30:15\")") && !dsl_true(ch, "(time-eq \"18:30:14\")"));
+    CHECK(dsl_true(ch, "(time-gt \"18:30:14\")") && dsl_true(ch, "(time-lt \"18:30:16\")"));
+    CHECK(dsl_true(ch, "(time-lt \"6:00:00\")") == false);
+    /* numbers: minutes after midnight (int = to the minute, decimal = to the second) */
+    CHECK(dsl_true(ch, "(time-eq 1110)") && dsl_true(ch, "(time-gt 1109)") && dsl_true(ch, "(time-lt 1111)"));
+    CHECK(dsl_true(ch, "(time-eq 1110.25)") && dsl_true(ch, "(time-gt 1110.2)") && !dsl_true(ch, "(time-eq 1110.5)"));
+    CHECK(dsl_true(ch, "(time-eq (+ 1440 1110))"));                         /* wraps at 24 h */
+    CHECK(!dsl_true(ch, "(time-gt -1)") && !dsl_true(ch, "(time-lt -1)") && !dsl_true(ch, "(time-eq -1)"));
+    env.sunset = 1100; env.sunrise = -1;
+    CHECK(dsl_true(ch, "(time-gt (env sunset))") && !dsl_true(ch, "(time-gt (env sunrise))"));
+    CHECK(dsl_true(ch, "(time-in (env sunset) \"23:00\")") && !dsl_true(ch, "(time-in (env sunrise) \"23:00\")"));
+    /* time-in: start inclusive, end exclusive, wraps past midnight, from = to never */
+    CHECK(dsl_true(ch, "(time-in \"18:00\" \"19:00\")") && dsl_true(ch, "(time-in \"18:30:15\" \"18:30:16\")"));
+    CHECK(!dsl_true(ch, "(time-in \"18:00\" \"18:30:15\")") && !dsl_true(ch, "(time-in \"18:30\" \"18:30\")"));
+    CHECK(dsl_true(ch, "(time-in \"18:00\" \"00:00\")") && dsl_true(ch, "(time-in \"18:00\" \"06:00\")"));
+    CHECK(!dsl_true(ch, "(time-in \"22:00\" \"06:00\")") && !dsl_true(ch, "(time-in \"06:00\" \"18:00\")"));
+    env.hour = 2;
+    CHECK(dsl_true(ch, "(time-in \"22:00\" \"06:00\")") && !dsl_true(ch, "(time-in \"22:00\" \"02:30\")") && dsl_true(ch, "(time-in \"22:00\" \"02:30:16\")"));
+    env.hour = 0; env.minute = 0; env.second = 0;
+    CHECK(dsl_true(ch, "(time-in \"22:00\" \"06:00\")") && dsl_true(ch, "(time-eq \"00:00\")") && !dsl_true(ch, "(time-in \"18:00\" \"00:00\")"));
+    env.hour = 23; env.minute = 59; env.second = 59;
+    CHECK(dsl_true(ch, "(time-in \"18:00\" \"00:00\")") && dsl_true(ch, "(time-eq \"23:59:59\")") && dsl_true(ch, "(time-ge \"23:59\")"));
+    env.hour = 18; env.minute = 30; env.second = 15;
+    /* dates: "MM-DD" every year, "YYYY-MM-DD" one day */
+    CHECK(dsl_true(ch, "(date-eq \"11-12\")") && dsl_true(ch, "(date-eq \"2026-11-12\")") && !dsl_true(ch, "(date-eq \"2025-11-12\")"));
+    CHECK(dsl_true(ch, "(date-gt \"11-11\")") && dsl_true(ch, "(date-lt \"12-01\")") && dsl_true(ch, "(date-ge \"11-12\")"));
+    CHECK(dsl_true(ch, "(date-le \"11-12\")") && !dsl_true(ch, "(date-gt \"11-12\")") && !dsl_true(ch, "(date-lt \"11-12\")"));
+    CHECK(dsl_true(ch, "(date-gt \"2025-12-31\")") && dsl_true(ch, "(date-lt \"2027-01-01\")") && !dsl_true(ch, "(date-gt \"2026-12-01\")"));
+    CHECK(dsl_true(ch, "(date-lt \"12-01\")") && !dsl_true(ch, "(date-lt \"01-06\")"));          /* "MM-DD" never wraps */
+    /* date-in: both ends inclusive; "MM-DD" pairs wrap past the year end */
+    CHECK(dsl_true(ch, "(date-in \"11-01\" \"11-30\")") && dsl_true(ch, "(date-in \"11-12\" \"11-12\")"));
+    CHECK(dsl_true(ch, "(date-in \"11-12\" \"11-13\")") && dsl_true(ch, "(date-in \"11-01\" \"11-12\")"));
+    CHECK(!dsl_true(ch, "(date-in \"12-01\" \"01-06\")") && dsl_true(ch, "(date-in \"11-01\" \"02-28\")"));
+    CHECK(dsl_true(ch, "(date-in \"2026-01-01\" \"2026-12-31\")") && !dsl_true(ch, "(date-in \"2026-12-01\" \"2026-01-06\")"));
+    env.month = 1; env.day = 3;
+    CHECK(dsl_true(ch, "(date-in \"12-01\" \"01-06\")") && !dsl_true(ch, "(date-in \"12-01\" \"01-02\")"));
+    env.month = 12; env.day = 31;
+    CHECK(dsl_true(ch, "(date-in \"12-01\" \"01-06\")") && dsl_true(ch, "(date-in \"12-31\" \"12-31\")"));
+    env.month = 2; env.day = 29; env.year = 2028;
+    CHECK(dsl_true(ch, "(date-eq \"02-29\")") && dsl_true(ch, "(date-eq \"2028-02-29\")"));
+    /* strings made at run time work too; a bad one is a counted fault */
+    env.month = 11; env.day = 12; env.year = 2026;
+    CHECK(dsl_true(ch, "(time-eq (str-cat \"18:\" \"30\"))") && dsl_true(ch, "(date-eq (str-cat \"11-\" (str-num 12)))"));
+    ch->perf.faults = 0;
+    CHECK(run(ch, "(if (time-eq (str-cat \"18\" \"30\")) (fill (buf O) #FFFFFF))", e) == 0);
+    CHECK(ch->perf.faults == 1 && ch->perf.last_err && strstr(ch->perf.last_err, "HH:MM"));
+    CHECK(run(ch, "(if (date-in (str-cat \"11-\" \"01\") \"2026-12-01\") (fill (buf O) #FFFFFF))", e) == 0);
+    CHECK(ch->perf.faults == 2 && strstr(ch->perf.last_err, "both dates"));
+    ch->perf.faults = 0;
+    /* nil while the clock isn't set, whatever it reads */
+    env.timeset = 0;
+    CHECK(!dsl_true(ch, "(time-eq \"18:30\")") && !dsl_true(ch, "(time-in \"00:00\" \"23:59:59\")") && !dsl_true(ch, "(date-eq \"11-12\")"));
+    CHECK(!dsl_true(ch, "(date-in \"01-01\" \"12-31\")") && !dsl_true(ch, "(time-ge 0)") && dsl_true(ch, "(not (time-lt \"18:31\"))"));
+    CHECK(ch->perf.faults == 0);
+    /* compile errors point at the bad literal */
+    struct { const char *src, *want; } bad[] = {
+        { "(time-gt \"18.30\")", "time-gt: a time is written" },     { "(time-gt \"24:00\")", "no such time" },
+        { "(time-gt \"18:60\")", "no such time" },                    { "(time-eq \"18:30:61\")", "no such time" },
+        { "(time-gt \"183:0\")", "a time is written" },               { "(time-gt \"\")", "a time is written" },
+        { "(time-in \"18:00\" \"6\")", "time-in: a time is written" }, { "(time-gt #FF0000)", "minutes after midnight" },
+        { "(time-gt t)", "minutes after midnight" },                  { "(date-eq \"11/12\")", "date-eq: a date is written" },
+        { "(date-eq \"13-01\")", "no such date" },                    { "(date-eq \"04-31\")", "no such date" },
+        { "(date-eq \"2026-02-29\")", "not a leap year" },            { "(date-eq \"1969-12-31\")", "start at 1970" },
+        { "(date-in \"11-01\" \"2026-12-01\")", "both dates" },       { "(date-eq 1112)", NULL },
+        { "(time-gt)", NULL },                                        { "(time-in \"18:00\")", NULL },
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        bool failed = channel_set_source(ch, bad[i].src, e, sizeof e) != 0;
+        CHECK(failed && (!bad[i].want || strstr(e, bad[i].want)));
+        if (!failed || (bad[i].want && !strstr(e, bad[i].want))) printf("  %s -> %s\n", bad[i].src, failed ? e : "(compiled)");
+    }
+    CHECK(channel_set_source(ch, "(def s \"18:30\") (if (time-eq s) (fill (buf O) #FFFFFF))", e, sizeof e) == 0);
+    CHECK(channel_set_source(ch, "(def x 0) (if (time-in \"22:00\" \"06:00\") (fill (buf O) #FFFFFF))", e, sizeof e) == 0);
+    env = (env_t){ .intensity = 256 };
+}
+
 static void t_env_npix(channel_t *ch)
 {
     char e[DSL_ERR_LEN];
@@ -2274,7 +2361,7 @@ int main(void)
 {
     CHECK(globals_init(&globals, 10) == 0);
     with_channel(t_fill); with_channel(t_scale_and_persistence); with_channel(t_invert); with_channel(t_nesting_globals);
-    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); t_astro(); with_channel(t_errors); with_channel(t_swap_atomic);
+    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); t_astro(); with_channel(t_errors); with_channel(t_swap_atomic);
     t_arena(); t_ws_parallel(); t_gamma(); t_dither(); t_wire(); t_wire_white(); t_wire_wmode(); t_fader(); t_intensity16(); t_px_scale_exhaustive(); t_blend_math(); t_stats();
     for (int i = 0; i < DSL_NUM_GLOBALS; i++) free(globals.buf[i]);
     printf("%d checks, %d failed\n", g_checks, g_fail);

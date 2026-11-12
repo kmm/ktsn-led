@@ -559,6 +559,11 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
     (str-num <n> [width] [decimals] [zero])    int/decimal -> string; right-aligned to width (0..32) with blanks or
                                                zeros; decimals 0..4 (default 0 for ints, 2 for decimals), rounded
     (str-time <format>)                        env time: %H %k %I %l %M %S %p %Y %y %m %d %e %j %%
+    (time-gt|ge|lt|le|eq <t>) (time-in <from> <to>)  time of day vs "HH:MM[:SS]" or minutes after midnight (int:
+                                               minute, decimal: second; wraps at 24 h; negative = nil), at the
+                                               precision given; time-in end exclusive, wraps past midnight
+    (date-gt|ge|lt|le|eq <d>) (date-in <from> <to>)  today vs "MM-DD" (every year) / "YYYY-MM-DD"; date-in both
+                                               ends included, MM-DD wraps past New Year; all nil while timeset is 0
     (str-cat <a> <b>...)                       2..10 strings or numbers (numbers as str-num's default); cut at 255
     (str-sub <s> [start] [end])                part of s, range rules; (str-len <s>) -> int
   Automation program only (compile error elsewhere; it may use G0..G7 and env, not X Y Z O):
@@ -643,6 +648,10 @@ Host tests: 4483 checks, 0 failures (macOS clang and gcc). **Builds cleanly with
   survives reboot, a program using `(env sunset)`/`(env sunrise)` switches correctly with the time zone. One
   calculation takes ~18 ms on the ESP32 (once a minute, in the low-priority automation task, so no frame cost).
   Not run on hardware: the API `loc` field (`tools/apitest.py` check only syntax-checked).
+- Date/time comparisons (0.19.0, 2026-11-12, `natives.c` "date and time comparisons", `bind_time_cmp`): host-tested
+  (`t_time_cmp`: precision, numbers incl. sunset -1 and 24 h wrap, time-in/date-in wrapping, leap days, run-time
+  strings as faults, nil without a clock, compile errors), reference entries (category Time) whose examples compile
+  and run, builds for every variant. **Not run on hardware.**
 - Rename to KTSN LED (0.18.0, 2026-11-11): host tests, IDE tests (incl. `storageRename.test.ts`, old config/library
   files, old image name), all six variants build from the renamed folder with configs identical to before apart from
   option names; Docker IDE checked by Claude (title, saved state copied to `ktsn-led.ide.*`). **Verified by the user**
@@ -721,6 +730,23 @@ Still unverified on hardware:
 2. `led_model` is `LED_MODEL_WS2812` (800 kHz). led_strip 3.x also has `LED_MODEL_WS2811`; try it if the string misbehaves.
 
 ## Next steps (planned)
+- Time comparisons, inputs, audio (plan agreed with the user 2026-11-12; **don't push to GitHub or run CI until all
+  three phases are done and tested by the user**). One handover + bump per phase:
+  - Phase 1, 0.19.0 (done 2026-11-12, see Status): `time-gt/ge/lt/le/eq <t>`, `(time-in <from> <to>)` (wraps midnight, end exclusive);
+    `date-gt/ge/lt/le/eq <d>`, `(date-in <from> <to>)` (wraps the year end, end inclusive). Times: a `"HH:MM[:SS]"`
+    literal (checked at compile time) or a number = minutes after midnight (decimal for seconds; negative, e.g.
+    `(env sunset)` without a location, makes the test nil). `time-eq` matches at the precision given (the minute for
+    "HH:MM" and numbers, the second for "HH:MM:SS"). Dates: `"MM-DD"` (every year) or `"YYYY-MM-DD"`. All of them
+    are **nil while the clock isn't set** (`timeset` 0). Channel programs and automation; not folded.
+  - Phase 2, 0.20.0: io modes `input` (pull=up|down|none, invert, debounce, opt-in `trigger` = run automation right
+    after a debounced change) and `analog` (ADC1 only: ESP32 GPIO 32..39, C6 GPIO 0..6; continuous/DMA sampling in a
+    background task, ring of recent readings). `(in <name>)` -> bool, `(analog <name> [samples 1..256, default 16])` ->
+    decimal 0..1 (average of the latest readings), in channel programs and automation; cached, cheap per call.
+    Console/API/IDE Board panel; IDE preview gets a toggle per input and a slider per analog input.
+  - Phase 3, 0.21.0 (nice to have; prototype first, measure CPU on both chips, stop if it doesn't fit): io mode
+    `audio` on an analog pin (analog mic module, MAX9814/MAX4466): ~8 kHz, 256-point integer FFT every 32 ms, a few bands
+    with automatic gain; env `band0..band7` (0..1), `level`, `beatms` (ms since the last beat), `beats` (count). IDE
+    preview: a fake beat at a chosen BPM.
 - Sun and moon in `env` (done 2026-11-10, 0.16.0, see "Sun and moon" and Status; decisions made with the user, no ephemeris
   tables, computed from NOAA solar equations and Meeus's low-accuracy lunar terms): `loc <lat> <lon>` console command,
   saved in settings and in the API config. New `env` values: `sunrise`, `sunset`, civil `dawn`, `dusk` (minutes after

@@ -25,7 +25,7 @@ done
 
 # EIM's activate script defines idf.py as a shell function, which a script doesn't inherit; export.sh puts it on PATH.
 if command -v idf.py >/dev/null 2>&1; then IDF="idf.py"
-elif [ -n "$IDF_PATH" ]; then IDF="python3 $IDF_PATH/tools/idf.py"
+elif [ -n "$IDF_PATH" ]; then IDF="@py $IDF_PATH/tools/idf.py"     # interpreter picked per build folder, below
 else echo "activate ESP-IDF v6.1 first (BUILD.md, Toolchain)" >&2; exit 1; fi
 
 want=" $* "
@@ -35,5 +35,9 @@ echo "$VARIANTS" | while IFS='|' read -r name dir target presets; do
     echo "=== $name ($dir: $target, $defaults)"
     # The root variant keeps the usual build/ + ./sdkconfig, so plain `idf.py build` stays the same build.
     if [ "$dir" = build ]; then cfg=sdkconfig; else cfg="$dir/sdkconfig"; fi
-    $IDF -B "$dir" -D SDKCONFIG="$cfg" -D IDF_TARGET="$target" -D SDKCONFIG_DEFAULTS="$defaults" build || exit 1
+    # idf.py refuses a build folder configured with a different interpreter path (python vs python3): reuse its own.
+    py=$(sed -n 's/^PYTHON:[A-Z]*=//p' "$dir/CMakeCache.txt" 2>/dev/null)
+    [ -n "$py" ] || py=$(command -v python || command -v python3)
+    run=$(echo "$IDF" | sed "s|^@py|$py|")
+    $run -B "$dir" -D SDKCONFIG="$cfg" -D IDF_TARGET="$target" -D SDKCONFIG_DEFAULTS="$defaults" build || exit 1
 done

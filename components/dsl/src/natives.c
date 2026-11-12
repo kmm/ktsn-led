@@ -902,6 +902,161 @@ static const char *bind_str_time(node_t *n, uint8_t *bad)
     return !n->args[0].node ? time_fmt_check(n->args[0].val.u.str) : NULL;
 }
 
+/* ---- date and time comparisons (time-gt ... time-in, date-gt ... date-in) ----
+ * A time is a "HH:MM" / "HH:MM:SS" string or a number of minutes after midnight (int: to the minute, decimal: to the
+ * second; wraps at 24 h; negative, e.g. (env sunset) without a location, makes the test nil). The comparisons work at
+ * the precision the time is given in, so (time-eq "18:30") holds all minute and gt/eq/lt never overlap. A date is
+ * "MM-DD" (every year) or "YYYY-MM-DD". Everything is nil while the clock isn't set. Literal strings are checked at
+ * compile time; strings made at run time are checked when used (a bad one is a fault). */
+typedef struct { int32_t s; int32_t prec; bool none; } tod_t;    /* seconds after midnight, 60 or 1 */
+typedef struct { int32_t y; int32_t m, d; } date_t;               /* y 0 = every year */
+
+static bool two_digits(const char *p, int32_t *v)
+{
+    if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9') return false;
+    *v = (p[0] - '0') * 10 + (p[1] - '0');
+    return true;
+}
+
+static const char *parse_tod(strref_t s, tod_t *t)
+{
+    const char *p = s.p;
+    size_t n = s.len, h = n == 4 || n == 7 ? 1 : 2;       /* "H:MM", "HH:MM", "H:MM:SS", "HH:MM:SS" */
+    int32_t hh = 0, mm, ss = 0;
+    if (n != h + 3 && n != h + 6) return "a time is written \"HH:MM\" or \"HH:MM:SS\"";
+    char hb[2] = { h == 1 ? '0' : p[0], p[h - 1] };
+    if (!two_digits(hb, &hh) || p[h] != ':' || !two_digits(p + h + 1, &mm)
+        || (n == h + 6 && (p[h + 3] != ':' || !two_digits(p + h + 4, &ss))))
+        return "a time is written \"HH:MM\" or \"HH:MM:SS\"";
+    if (hh > 23 || mm > 59 || ss > 59) return "no such time (00:00 .. 23:59:59)";
+    t->s = hh * 3600 + mm * 60 + ss;
+    t->prec = n == h + 6 ? 1 : 60;
+    t->none = false;
+    return NULL;
+}
+
+static const char *time_arg(value_t v, tod_t *t)
+{
+    if (v.type == V_STR) return parse_tod(v.u.str, t);
+    t->none = v.u.i < 0;
+    if (v.type == V_INT) { t->s = (int32_t)((int64_t)v.u.i % 1440) * 60; t->prec = 60; }
+    else { t->s = (int32_t)((((int64_t)v.u.i * 60 + 32768) >> 16) % 86400); t->prec = 1; }
+    return NULL;
+}
+
+static const char *parse_date(strref_t s, date_t *d)
+{
+    static const uint8_t mdays[12] = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    const char *p = s.p;
+    int32_t y = 0, yh, yl;
+    if (s.len == 10) {
+        if (!two_digits(p, &yh) || !two_digits(p + 2, &yl) || p[4] != '-') return "a date is written \"MM-DD\" or \"YYYY-MM-DD\"";
+        y = yh * 100 + yl; p += 5;
+    } else if (s.len != 5) return "a date is written \"MM-DD\" or \"YYYY-MM-DD\"";
+    if (!two_digits(p, &d->m) || p[2] != '-' || !two_digits(p + 3, &d->d)) return "a date is written \"MM-DD\" or \"YYYY-MM-DD\"";
+    if (d->m < 1 || d->m > 12 || d->d < 1 || d->d > mdays[d->m - 1]) return "no such date";
+    if (y && d->m == 2 && d->d == 29 && !(y % 4 == 0 && (y % 100 || y % 400 == 0))) return "no such date (not a leap year)";
+    if (s.len == 10 && y < 1970) return "dates start at 1970";
+    d->y = y;
+    return NULL;
+}
+
+/* now vs time at the time's precision: -1, 0, 1 */
+static int tod_cmp(const env_t *e, const tod_t *t)
+{
+    int32_t now = (e->hour * 3600 + e->minute * 60 + e->second) / t->prec, at = t->s / t->prec;
+    return (now > at) - (now < at);
+}
+
+static int date_cmp(const env_t *e, const date_t *d)
+{
+    int64_t now = (d->y ? (int64_t)e->year * 10000 : 0) + e->month * 100 + e->day;
+    int64_t at = (int64_t)d->y * 10000 + d->m * 100 + d->d;
+    return (now > at) - (now < at);
+}
+
+enum { CMP_GT, CMP_GE, CMP_LT, CMP_LE, CMP_EQ };
+static bool cmp_holds(int r, int op)
+{
+    switch (op) {
+    case CMP_GT: return r > 0;
+    case CMP_GE: return r >= 0;
+    case CMP_LT: return r < 0;
+    case CMP_LE: return r <= 0;
+    default:     return r == 0;
+    }
+}
+
+static value_t time_cmp(exec_ctx_t *c, const value_t *a, int op)
+{
+    tod_t t;
+    if ((c->err = time_arg(a[0], &t)) || !c->env->timeset || t.none) return boolv(false);
+    return boolv(cmp_holds(tod_cmp(c->env, &t), op));
+}
+static value_t date_cmpv(exec_ctx_t *c, const value_t *a, int op)
+{
+    date_t d;
+    if ((c->err = parse_date(a[0].u.str, &d)) || !c->env->timeset) return boolv(false);
+    return boolv(cmp_holds(date_cmp(c->env, &d), op));
+}
+static value_t n_time_gt(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)n; return time_cmp(c, a, CMP_GT); }
+static value_t n_time_ge(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)n; return time_cmp(c, a, CMP_GE); }
+static value_t n_time_lt(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)n; return time_cmp(c, a, CMP_LT); }
+static value_t n_time_le(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)n; return time_cmp(c, a, CMP_LE); }
+static value_t n_time_eq(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)n; return time_cmp(c, a, CMP_EQ); }
+static value_t n_date_gt(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)n; return date_cmpv(c, a, CMP_GT); }
+static value_t n_date_ge(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)n; return date_cmpv(c, a, CMP_GE); }
+static value_t n_date_lt(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)n; return date_cmpv(c, a, CMP_LT); }
+static value_t n_date_le(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)n; return date_cmpv(c, a, CMP_LE); }
+static value_t n_date_eq(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)n; return date_cmpv(c, a, CMP_EQ); }
+
+/* (time-in <from> <to>): from <= now < to, wrapping past midnight when to is earlier; from = to is never. */
+static value_t n_time_in(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    (void)n;
+    tod_t f, t;
+    if ((c->err = time_arg(a[0], &f)) || (c->err = time_arg(a[1], &t)) || !c->env->timeset || f.none || t.none)
+        return boolv(false);
+    int32_t now = c->env->hour * 3600 + c->env->minute * 60 + c->env->second;
+    return boolv(f.s < t.s ? now >= f.s && now < t.s : f.s > t.s && (now >= f.s || now < t.s));
+}
+
+/* (date-in <from> <to>): from <= today <= to; "MM-DD" pairs wrap past the year end, "YYYY-MM-DD" pairs don't. */
+static value_t n_date_in(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    (void)n;
+    date_t f, t;
+    if ((c->err = parse_date(a[0].u.str, &f)) || (c->err = parse_date(a[1].u.str, &t))) return boolv(false);
+    if (!f.y != !t.y) { c->err = "date-in: both dates need a year, or neither"; return boolv(false); }
+    if (!c->env->timeset) return boolv(false);
+    int lo = date_cmp(c->env, &f), hi = date_cmp(c->env, &t);
+    bool wraps = !f.y && f.m * 100 + f.d > t.m * 100 + t.d;
+    return boolv(wraps ? lo >= 0 || hi <= 0 : lo >= 0 && hi <= 0);
+}
+
+/* Compile time: literal strings are checked here (the error points at the bad one); numbers can only be times. */
+static const char *bind_time_cmp(node_t *n, uint8_t *bad)
+{
+    static char msg[96];                  /* compiles are serialized (cmd_lock on a board, one thread in WASM) */
+    bool is_date = !strncmp(n->def->name, "date-", 5);
+    for (uint8_t i = 0; i < n->nargs; i++) {
+        const arg_t *g = &n->args[i];
+        uint8_t ty = arg_type(g);
+        const char *e = NULL;
+        if (!is_date && !numeric(ty) && ty != V_STR) e = "a time is \"HH:MM\", \"HH:MM:SS\" or minutes after midnight";
+        else if (!g->node && ty == V_STR) {
+            tod_t t; date_t d;
+            e = is_date ? parse_date(g->val.u.str, &d) : parse_tod(g->val.u.str, &t);
+        }
+        if (e) { *bad = i; snprintf(msg, sizeof msg, "%s: %s", n->def->name, e); return msg; }
+    }
+    if (!strcmp(n->def->name, "date-in") && !n->args[0].node && !n->args[1].node
+        && (n->args[0].val.u.str.len == 10) != (n->args[1].val.u.str.len == 10)) {
+        *bad = 1; return "date-in: both dates need a year, or neither";
+    }
+    return NULL;
+}
+
 /* (str-cat <a> <b> ...) -> string: strings joined; numbers are written as str-num writes them by default. At most
  * DSL_STR_MAX characters (the rest is cut off). */
 static value_t n_str_cat(exec_ctx_t *c, const value_t *a, uint8_t n)
@@ -1473,6 +1628,18 @@ static const native_def_t k_natives[] = {
     { "seg7",   n_seg7,   V_BUF, 2, 6, { A_BUF, A_ANY, A_SYM, A_INT, A_INT, A_INT },                0, bind_seg7 },
     { "seg9",   n_seg9,   V_BUF, 2, 6, { A_BUF, A_ANY, A_SYM, A_INT, A_INT, A_INT },                0, bind_seg9 },
     { "seg14",  n_seg14,  V_BUF, 2, 8, { A_BUF, A_ANY, A_SYM, A_INT, A_INT, A_INT, A_INT, A_INT },  0, bind_seg14 },
+    { "time-gt",  n_time_gt,  V_BOOL, 1, 1, { A_ANY },          0, bind_time_cmp },
+    { "time-ge",  n_time_ge,  V_BOOL, 1, 1, { A_ANY },          0, bind_time_cmp },
+    { "time-lt",  n_time_lt,  V_BOOL, 1, 1, { A_ANY },          0, bind_time_cmp },
+    { "time-le",  n_time_le,  V_BOOL, 1, 1, { A_ANY },          0, bind_time_cmp },
+    { "time-eq",  n_time_eq,  V_BOOL, 1, 1, { A_ANY },          0, bind_time_cmp },
+    { "time-in",  n_time_in,  V_BOOL, 2, 2, { A_ANY, A_ANY },   0, bind_time_cmp },
+    { "date-gt",  n_date_gt,  V_BOOL, 1, 1, { A_STR },          0, bind_time_cmp },
+    { "date-ge",  n_date_ge,  V_BOOL, 1, 1, { A_STR },          0, bind_time_cmp },
+    { "date-lt",  n_date_lt,  V_BOOL, 1, 1, { A_STR },          0, bind_time_cmp },
+    { "date-le",  n_date_le,  V_BOOL, 1, 1, { A_STR },          0, bind_time_cmp },
+    { "date-eq",  n_date_eq,  V_BOOL, 1, 1, { A_STR },          0, bind_time_cmp },
+    { "date-in",  n_date_in,  V_BOOL, 2, 2, { A_STR, A_STR },   0, bind_time_cmp },
     { "env",    n_env,    V_INT, 1, 1, { A_SYM },  0, bind_env },
     { "intensity",     n_intensity,     V_FIX, 0, 1, { A_INT },                     NF_AUTOMATION, NULL },
     { "set-intensity", n_set_intensity, V_NIL, 2, 3, { A_INT, A_UNIT, A_NUMERIC },  NF_AUTOMATION | NF_OPT0, NULL },

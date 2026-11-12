@@ -240,6 +240,12 @@ Programs sent over HTTP may be up to 3999 characters, span several lines and con
                                                 daymin daysec timeset intensity npix sunrise sunset
                                                 dawn dusk daylight moon moonlit -> int
                                                 dayfrac hourfrac minfrac -> number 0..<1
+    (time-gt t) time-ge time-lt time-le time-eq the time of day vs t: "HH:MM", "HH:MM:SS" or minutes after
+                                                midnight, at the precision given      -> boolean
+    (time-in from to)                           from <= now < to, wraps past midnight -> boolean
+    (date-gt d) date-ge date-lt date-le date-eq today vs "MM-DD" (every year) or "YYYY-MM-DD" -> boolean
+    (date-in from to)                           both days included, "MM-DD" wraps past New Year -> boolean
+                                                (all time-/date- tests are nil until the clock is set)
     (def <name> <value>)                        a variable (program or function body top level)
     (defn <name> (<p:type>...) <body>...)       a function; types int decimal color bool buf str
     (fn (<p:type>...) <body>...)                a function written where one is passed

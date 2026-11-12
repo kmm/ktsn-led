@@ -24,8 +24,8 @@ export interface Entry {
   context?: 'automation';     // only in the automation program (the example compiles and runs as one)
 }
 
-export type Category = 'Buffers' | 'Filling' | 'Pixels' | 'Blending' | 'Motion' | 'Logic' | 'Math' | 'Environment' | 'Variables' | 'Functions' | 'Text' | 'Displays' | 'Automation';
-export const CATEGORIES: Category[] = ['Buffers', 'Filling', 'Pixels', 'Blending', 'Motion', 'Logic', 'Math', 'Environment', 'Variables', 'Functions', 'Text', 'Displays', 'Automation'];
+export type Category = 'Buffers' | 'Filling' | 'Pixels' | 'Blending' | 'Motion' | 'Logic' | 'Math' | 'Environment' | 'Time' | 'Variables' | 'Functions' | 'Text' | 'Displays' | 'Automation';
+export const CATEGORIES: Category[] = ['Buffers', 'Filling', 'Pixels', 'Blending', 'Motion', 'Logic', 'Math', 'Environment', 'Time', 'Variables', 'Functions', 'Text', 'Displays', 'Automation'];
 /** Words the compiler handles itself (not natives): documented, but not in the compiler's native table. */
 export const KEYWORDS = ['def', 'defn', 'fn', 'use'];
 
@@ -40,6 +40,39 @@ const dstSrc = (verb: string): ArgSpec[] => [
 const blendDetails = (formula: string) =>
   `${formula}\n\nPixel i of dst is combined with pixel i of src, over the shorter of the two. Use slice to position or ` +
   'reverse either side. dst and src may overlap: the result is as if src were read completely first.';
+
+const TIME_RULES = 'A time is a string "HH:MM" or "HH:MM:SS" (the hour may be one digit), or a number of minutes ' +
+  'after midnight, so (env sunset), (env sunrise) and (env daymin) fit straight in. An int counts to the minute, a ' +
+  'decimal to the second (1110.25 is 18:30:15); numbers wrap at 24 hours, and a negative one, such as sunset without ' +
+  'a location, makes the test false.\n\nThe comparison works at the precision the time is written in: "18:30" is the ' +
+  'whole minute, so (time-eq "18:30") is true for 60 seconds, (time-gt "18:30") only from 18:31:00, and gt, eq and ' +
+  'lt never overlap. "18:30:15" compares to the second.\n\nAll time and date tests are false while the clock isn\'t ' +
+  'set ((env timeset) is 0), so nothing switches on by mistake right after power-up. A time written in the program ' +
+  'is checked when it compiles; one made while it runs (str-cat) is checked when used, and a bad one is a fault.';
+const DATE_RULES = 'A date is a string "MM-DD", which matches every year, or "YYYY-MM-DD", one day. "MM-DD" ' +
+  'comparisons stay within the year: (date-lt "03-01") is true in January and February. The date is the board\'s local ' +
+  'date. All time and date tests are false while the clock isn\'t set ((env timeset) is 0). A date written in the ' +
+  'program is checked when it compiles (02-29 is fine for "MM-DD"; with a year it must be a leap year).';
+
+function timeCmp(name: string, word: string, summary: string): Entry[] {
+  return [{
+    name, category: 'Time', summary,
+    args: [{ name: 'time', type: 'string or number', desc: '"HH:MM", "HH:MM:SS" or minutes after midnight' }],
+    returns: 'boolean',
+    details: `True when the local time of day is ${word} the given time.\n\n${TIME_RULES}`,
+    example: `; on ${word} 18:30 (to the minute), off otherwise\n(if (${name} "18:30")\n  (fill (buf O) #FFA040)\n  (fill (buf O) #000000))\n` +
+      `; the same with a number: minutes after midnight\n(if (${name} (+ (* 18 60) 30)) (scale (buf O) 0.5))`,
+  }];
+}
+function dateCmp(name: string, word: string, summary: string): Entry[] {
+  return [{
+    name, category: 'Time', summary,
+    args: [{ name: 'date', type: 'string', desc: '"MM-DD" (every year) or "YYYY-MM-DD"' }],
+    returns: 'boolean',
+    details: `True when today is ${word} the given date.\n\n${DATE_RULES}`,
+    example: `; orange ${word} Halloween, every year\n(if (${name} "10-31")\n  (fill (buf O) #FF6000)\n  (fill (buf O) #000000))`,
+  }];
+}
 
 export const ENTRIES: Entry[] = [
   /* ---------------- Buffers ---------------- */
@@ -601,6 +634,39 @@ export const ENTRIES: Entry[] = [
     example: '(fill (buf O) #000000)\n(fill (buf O) #FF0000 0 (env second))    ; a bar growing every second\n\n' +
       '; a dot going round the string once a minute\n(set (buf O) (floor (* (env minfrac) (env npix))) #0000FF)\n\n' +
       '; lit while the sun is down, on weekdays\n(if (and (eq (env daylight) 0) (gt (env weekday) 0) (lt (env weekday) 6))\n  (fill (buf O) #402000))',
+  },
+
+  /* ---------------- Time and date ---------------- */
+  ...timeCmp('time-gt', 'after', 'Later than a time of day (at the precision it is written in).'),
+  ...timeCmp('time-ge', 'at or after', 'At or later than a time of day.'),
+  ...timeCmp('time-lt', 'before', 'Earlier than a time of day.'),
+  ...timeCmp('time-le', 'at or before', 'At or earlier than a time of day.'),
+  ...timeCmp('time-eq', 'at', 'During that minute (or second) of the day.'),
+  {
+    name: 'time-in', category: 'Time', summary: 'Between two times of day; wraps past midnight.',
+    args: [{ name: 'from', type: 'string or number', desc: 'start, included: "HH:MM", "HH:MM:SS" or minutes after midnight' },
+      { name: 'to', type: 'string or number', desc: 'end, not included' }],
+    returns: 'boolean',
+    details: 'True from from up to (not including) to. When to is earlier than from the span goes past midnight: ' +
+      '(time-in "22:00" "06:00") is true from 22:00 to 05:59:59. The same time twice is never true.\n\n' + TIME_RULES,
+    example: '; warm white in the evening, until sunset if the location is set\n(if (time-in "17:00" "23:30")\n  (fill (buf O) #FF9040)\n  (fill (buf O) #000000))\n' +
+      '(if (time-in (env sunset) "23:30") (scale (buf O) 0.5))',
+  },
+  ...dateCmp('date-gt', 'after', 'Later than a date.'),
+  ...dateCmp('date-ge', 'on or after', 'On or later than a date.'),
+  ...dateCmp('date-lt', 'before', 'Earlier than a date.'),
+  ...dateCmp('date-le', 'on or before', 'On or earlier than a date.'),
+  ...dateCmp('date-eq', 'on', 'On that day (every year, or one day).'),
+  {
+    name: 'date-in', category: 'Time', summary: 'Between two dates, both days included; "MM-DD" spans wrap past the year end.',
+    args: [{ name: 'from', type: 'string', desc: 'first day, "MM-DD" or "YYYY-MM-DD"' },
+      { name: 'to', type: 'string', desc: 'last day, written the same way' }],
+    returns: 'boolean',
+    details: 'True on from, to and every day between. With "MM-DD" dates the span repeats every year, and wraps past ' +
+      'New Year when to comes before from: (date-in "12-01" "01-06") is December and the first six days of January. ' +
+      'With "YYYY-MM-DD" dates it is that span once (nothing if to is before from). Both dates must be written the same ' +
+      'way.\n\n' + DATE_RULES,
+    example: '; red and green over the holidays\n(set (buf G0) 0 #FF0000 #00FF00)\n(if (date-in "12-01" "01-06")\n  (fill-pat (buf O) (slice (buf G0) 0 2))\n  (fill (buf O) #FFFFFF))',
   },
 
   /* ---------------- Variables ---------------- */

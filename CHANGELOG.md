@@ -3,6 +3,15 @@
 One version (`version.txt`) covers the firmware, the DSL, the console and HTTP API, and the IDE. Rules for bumping it
 are in CLAUDE.md ("Versioning"). Newest first; versions before 0.10.0 were not recorded here.
 
+## 0.19.0 (2026-11-12)
+- New: date and time comparisons for scheduling. `(time-gt t)`, `time-ge`, `time-lt`, `time-le`, `time-eq` compare the
+  time of day with `"HH:MM"`, `"HH:MM:SS"` or a number of minutes after midnight (so `(env sunset)` fits), at the
+  precision the time is written in. `(time-in from to)` is a span that wraps past midnight (end not included).
+- New: `(date-gt d)`, `date-ge`, `date-lt`, `date-le`, `date-eq` with `"MM-DD"` (every year) or `"YYYY-MM-DD"`, and
+  `(date-in from to)` (both days included; `"MM-DD"` spans wrap past New Year).
+- All of them are false until the clock is set. Times and dates written in a program are checked when it compiles.
+  IDE: a new reference category, Time.
+
 ## 0.18.0 (2026-11-11)
 - Renamed the project from ledctl to **KTSN LED** (short name `ktsn-led`). The firmware image is `ktsn-led.bin`, new or
   reset boards answer as `ktsn-led.local` (a hostname already set is kept), and `version` reports "KTSN LED".

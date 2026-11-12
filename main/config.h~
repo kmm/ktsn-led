@@ -1,0 +1,17 @@
+#pragma once
+#include <stdint.h>
+
+#define FRAME_HZ            60
+#define GLOBAL_BUF_PIXELS   256      /* length of each of the 8 global buffers */
+#define CHANNEL_SCRATCH     2048     /* per-channel arena bytes, reset every frame */
+
+/* WS2811 modules are commonly RGB order, some strings are GRB. Change if red/green are swapped. */
+#define LED_COLOR_FORMAT    LED_STRIP_COLOR_COMPONENT_FMT_RGB   /* or _GRB */
+
+typedef struct { int gpio; uint16_t npix; } led_chan_cfg_t;
+
+/* One entry per channel. Original ESP32 has 8 RMT TX channels; keep GPIOs off the flash/boot pins. */
+#define LED_CHANNELS_INIT { \
+    { .gpio = 18, .npix = 100 }, \
+    /* { .gpio = 19, .npix = 100 }, */ \
+}

@@ -1,0 +1,12 @@
+# Serves the IDE at http://localhost:8080 (localhost only: a secure context for Web Serial, not exposed to the LAN).
+name: ktsn-led-ide
+services:
+  ide:
+    build:
+      context: ..
+      dockerfile: ide/Dockerfile
+      args:
+        EMSDK_TAG: ${EMSDK_TAG:-4.0.15}     # ide/run.sh picks the native -arm64 image on Apple Silicon
+    ports:
+      - "127.0.0.1:8080:80"
+    restart: unless-stopped

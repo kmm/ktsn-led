@@ -1,0 +1,8 @@
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# 2 MB flash, single 1.5 MB app partition (stock layout has only 1 MB) plus a 256 KB `progs` partition for program
+# text (partitions_2mb.csv). NVS stays at the same offset.
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_2mb.csv"

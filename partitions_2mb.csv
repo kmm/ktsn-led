@@ -1,0 +1,7 @@
+# Name,   Type, SubType, Offset,   Size,     Flags
+# 2 MB flash: nvs/phy_init/factory exactly as ESP-IDF's partitions_singleapp_large (nvs at 0x9000: saved settings
+# survive), plus `progs` at the end of flash for program text (channel programs, autoexec, automation, library).
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  1500K,
+progs,    data, nvs,     0x1C0000, 0x40000,

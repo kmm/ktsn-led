@@ -1,0 +1,4 @@
+# Preset for boards whose USB port is the chip's own USB-Serial/JTAG (no UART bridge chip),
+# e.g. Seeed XIAO ESP32-C6 / C3, ESP32-C6 / S3 boards with a single native USB port.
+# Puts the console (logs + led> REPL) on that USB port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

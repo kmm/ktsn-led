@@ -1,0 +1,37 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  host:
+    name: Host tests (DSL core)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C host
+
+  ide:
+    name: IDE (WASM core, tests, typecheck, build)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # The same image ide/run.sh builds: emsdk -> WASM core, npm ci, vitest, tsc + vite build.
+      - run: docker build -f ide/Dockerfile .
+
+  firmware:
+    name: Firmware ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.1
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [esp32-2mb, esp32-2mb-nowifi, esp32-4mb, esp32c6, esp32c6-parlio, esp32c6-nowifi]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh" > /dev/null
+          tools/build-variants.sh ${{ matrix.variant }}

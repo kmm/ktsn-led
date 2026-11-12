@@ -1,0 +1,16 @@
+# Only components/dsl, main/gamma.*, main/dither.h, main/wire.*, main/astro.* and ide/ are needed to build the IDE image.
+*
+!components/dsl
+!main/gamma.c
+!main/gamma.h
+!main/dither.h
+!main/wire.c
+!main/wire.h
+!main/astro.c
+!main/astro.h
+!ide/wasm
+!ide/web
+!ide/nginx.conf
+ide/web/node_modules
+ide/web/dist
+ide/web/src/wasm/generated

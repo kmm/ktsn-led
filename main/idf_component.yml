@@ -1,0 +1,4 @@
+dependencies:
+  espressif/led_strip: "^3.0.0"   # 3.x API: color_component_format (2.x used led_pixel_format)
+  espressif/cjson: "^1.7.19"   # JSON for the HTTP API (no longer bundled with ESP-IDF 6)
+  espressif/mdns: "^1.14.0"   # ktsn-led.local + service discovery

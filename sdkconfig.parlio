@@ -1,0 +1,2 @@
+# Preset: drive all LED strings with PARLIO (one parallel DMA transfer; C6 and other chips with PARLIO).
+CONFIG_KTSN_OUTPUT_PARLIO=y

@@ -1,0 +1,23 @@
+# ESP-IDF build output (one directory per variant, see BUILD.md) and generated configs
+build/
+build-*/
+sdkconfig
+sdkconfig.old
+managed_components/
+
+# Host tests
+host/test_dsl
+host/test_dsl.dSYM/
+
+# IDE: dependencies, build output and the WebAssembly core (made by ide/wasm/build.sh)
+ide/web/node_modules/
+ide/web/dist/
+ide/web/src/wasm/generated/
+
+# Editors and OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+__pycache__/
+*.pyc

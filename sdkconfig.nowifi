@@ -1,0 +1,3 @@
+# Preset without WiFi/NTP (much smaller image). Combine with other presets, e.g.
+#   idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.nowifi" ...
+CONFIG_KTSN_WIFI=n

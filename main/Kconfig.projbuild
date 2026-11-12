@@ -1,0 +1,114 @@
+menu "KTSN LED"
+
+    config KTSN_WIFI
+        bool "WiFi station + NTP time sync"
+        default y
+        help
+            Adds the WiFi station and SNTP client (console commands `wifi` and `ntp`).
+            The WiFi stack is most of the firmware image (several hundred KB). Without it,
+            set the clock with `env time`. Stored WiFi settings are kept either way.
+
+    config KTSN_WIFI_PS_NONE
+        bool "Disable WiFi power save"
+        depends on KTSN_WIFI
+        default y
+        help
+            Keep the radio fully on (esp_wifi_set_ps(WIFI_PS_NONE)) instead of the IDF default
+            WIFI_PS_MIN_MODEM. Uses more power, but on the original ESP32 it removes the LED output
+            glitches that WiFi power save causes. Turn off only for battery use where glitches are acceptable.
+
+    config KTSN_SERIAL_API
+        bool "Serial JSON API (`api` command, for the IDE)"
+        default y
+        help
+            `api` on the serial console switches it to one JSON request/response per line (responses
+            start with 0x1E), sharing the HTTP API's code. Works without WiFi. Adds cJSON (~12 KB) to
+            WiFi-less builds. No token: serial access is physical access.
+
+    config KTSN_NET_CLI
+        bool "Network CLI (telnet / netcat)"
+        depends on KTSN_WIFI
+        default y
+        help
+            The serial console's commands over TCP. Refuses all connections until a token is set
+            (`token <secret>`); each session starts with `auth <token>`. Unencrypted: trusted LAN only.
+
+    config KTSN_NET_CLI_PORT
+        int "Network CLI TCP port"
+        depends on KTSN_NET_CLI
+        default 23
+        range 1 65535
+
+    config KTSN_HTTP_API
+        bool "HTTP/JSON API"
+        depends on KTSN_WIFI
+        default y
+        help
+            /api/status, /api/config (GET, PATCH), /api/prog/<n> (PUT), /api/cmd, /api/save, /api/reboot.
+            Every request needs "Authorization: Bearer <token>"; with no token set everything is refused.
+            Plain HTTP: trusted LAN only. Adds about 60 KB (esp_http_server + cJSON).
+
+    config KTSN_HTTP_PORT
+        int "HTTP API TCP port"
+        depends on KTSN_HTTP_API
+        default 80
+        range 1 65534
+
+    config KTSN_MDNS
+        bool "mDNS (<hostname>.local) and service discovery"
+        depends on KTSN_WIFI
+        default y
+        help
+            Answers as <hostname>.local (default ktsn-led.local, set with `hostname`) and advertises the
+            HTTP API (_http._tcp) and network CLI (_telnet._tcp). The hostname is also sent via DHCP.
+
+    config KTSN_OTA
+        bool "Firmware updates over the network (POST /api/ota)"
+        depends on KTSN_HTTP_API
+        default n
+        help
+            Needs a partition table with two OTA app slots (sdkconfig.flash4mb: partitions_4mb.csv) and is meant
+            to be used with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE: a new image must come up (render running for
+            30 s) or the bootloader goes back to the previous one. Token-protected like the rest of the API; the
+            image must be a KTSN LED build for this chip. Not available on 2 MB boards (the image doesn't fit twice).
+
+    choice KTSN_OUTPUT
+        prompt "LED output driver"
+        default KTSN_OUTPUT_RMT
+        help
+            How the strings are driven. RMT works on every chip. PARLIO (C6 and other chips with a
+            parallel IO peripheral) sends all strings in one DMA transfer, one data line each, so WiFi
+            can't disturb the timing and strings are sent in parallel.
+
+        config KTSN_OUTPUT_RMT
+            bool "RMT (led_strip), one RMT channel per string"
+
+        config KTSN_OUTPUT_PARLIO
+            bool "PARLIO, all strings in one parallel DMA transfer"
+            depends on SOC_PARLIO_SUPPORTED
+            help
+                Up to 8 strings, any GPIOs. One frame is sent at once and must fit in 65535 bytes:
+                15 bytes per pixel of the longest string, times the lane count rounded up to 1/2/4/8
+                (2 strings: up to 2184 px each). Bit timing equals led_strip's WS2812 RMT timing.
+    endchoice
+
+    config KTSN_RMT_MEM_SYMBOLS
+        int "RMT memory per LED channel (symbols, 0 = driver default)"
+        depends on KTSN_OUTPUT_RMT
+        default 256 if IDF_TARGET_ESP32 && KTSN_WIFI
+        default 64 if IDF_TARGET_ESP32
+        default 96 if (IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32C6) && KTSN_WIFI
+        default 0
+        range 0 512
+        help
+            RMT symbols (one per data bit) buffered per LED channel. Without RMT DMA (ESP32, C3, C6;
+            only S3/P4 have it) the driver refills this buffer from an interrupt in halves while a frame
+            is sent; more memory means fewer refills and more slack, so WiFi interrupt latency causes
+            fewer glitches. Use a multiple of the chip's block size; channels that don't fit fail at
+            boot with a log message and stay dark.
+            ESP32: 64-symbol blocks, 512 total (64: 8 ch, 128: 4, 256: 2, 512: 1). Default 256 with WiFi
+            (verified glitch-free), 64 without.
+            C3/C6: 48-symbol blocks, 2 TX channels. Default 96 with WiFi (1 channel), untested; these
+            chips are single-core, so WiFi and LED output share the CPU.
+
+endmenu

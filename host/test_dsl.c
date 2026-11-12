@@ -2069,7 +2069,12 @@ static void t_functions(channel_t *ch)
     /* the limit counts bytes, not levels: wide calls and ifs cost more */
     static char wide[1400];
     char body[400] = "x";
-    for (int i = 0; i < 11; i++) { char t[420]; snprintf(t, sizeof t, "(+ 1 1 1 1 1 1 1 1 1 %s)", body); strcpy(body, t); }
+    for (int i = 0; i < 11; i++) {   /* grows to 243 bytes; checking the length also keeps gcc's -Wformat-truncation quiet */
+        char t[sizeof body];
+        int n = snprintf(t, sizeof t, "(+ 1 1 1 1 1 1 1 1 1 %s)", body);
+        CHECK(n > 0 && n < (int)sizeof t);
+        memcpy(body, t, sizeof body);
+    }
     snprintf(wide, sizeof wide, "(defn g0 (x:int) %s)", body);
     CHECK(holds(ch, wide, "(gt (g0 0) 0)"));                             /* the widest program one function can hold */
     strcat(wide, "(defn g1 (x:int) (g0 x))(defn g2 (x:int) (+ 1 1 1 1 1 1 1 1 1 (+ 1 1 1 1 1 1 1 1 1 (+ 1 1 1 1 1 1 1 1 1 "

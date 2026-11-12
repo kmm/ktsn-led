@@ -73,7 +73,8 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   fresh clone (steps in BUILD.md). Only release a version the user has flashed and confirmed. CI
   (`.github/workflows/ci.yml`) runs host tests, the IDE Docker build and every variant from `tools/build-variants.sh`;
   a new variant goes in that script's list, the CI matrix and BUILD.md. Keep personal data (the user's location, IPs,
-  serial numbers) out of committed files.
+  serial numbers) out of committed files. **Verified by the user** (2026-11-11): the v0.18.0 `esp32c6` release zip
+  flashes and runs on the C6.
 
 ## Design decisions (keep these unless there is a reason to change them)
 - Pixel layout `0xWWRRGGBB`. Color order is applied only at output (`led_out.c`, per channel wire format). Global intensity is applied at output, not baked into buffers.

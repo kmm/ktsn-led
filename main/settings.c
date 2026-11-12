@@ -28,7 +28,7 @@ static const led_chan_cfg_t k_default_ch[] = LED_CHANNELS_INIT;
 static void default_io(io_cfg_t *io)
 {
     memset(io, 0, IO_MAX * sizeof *io);
-    for (int i = 0; i < IO_MAX; i++) { io[i].gpio = -1; io[i].freq = IO_PWM_DEFAULT_HZ; }
+    for (int i = 0; i < IO_MAX; i++) { io[i].gpio = -1; io[i].freq = IO_PWM_DEFAULT_HZ; io[i].debounce = IO_DEBOUNCE_DEFAULT; }
 #ifdef IO_DEFAULTS_INIT
     static const io_cfg_t k[] = IO_DEFAULTS_INIT;
     _Static_assert(sizeof k / sizeof k[0] <= IO_MAX, "too many default outputs");
@@ -127,6 +127,13 @@ static void load(nvs_handle_t h)
     if (nvs_get_blob(h, "io", io, &iol) == ESP_OK) {
         int bad;
         bool ok = iol == sizeof io;
+        if (iol == IO_MAX * IO_CFG_V1_SIZE) {          /* saved before inputs existed (0.19.0 and older): outputs only */
+            uint8_t raw[IO_MAX * IO_CFG_V1_SIZE];
+            memcpy(raw, io, sizeof raw);
+            memset(io, 0, sizeof io);
+            for (int i = 0; i < IO_MAX; i++) { memcpy(&io[i], raw + i * IO_CFG_V1_SIZE, IO_CFG_V1_SIZE); io[i].debounce = IO_DEBOUNCE_DEFAULT; }
+            ok = true;
+        }
         for (int i = 0; ok && i < IO_MAX; i++) { io[i].name[IO_NAME_MAX] = 0; if (io[i].gpio < -1) ok = false; }
         if (ok && !io_check(io, &bad)) memcpy(g_set.io, io, sizeof io);
         else ESP_LOGW(TAG, "stored outputs are invalid, using defaults");
@@ -295,15 +302,19 @@ void settings_dump(cmd_out_t *o)
     out_printf(o, "  %-10s refresh x%u, parallel %s\n", "output", rf, par ? "on" : "off");
     io_cfg_t io[IO_MAX];
     size_t iol = sizeof io;
-    if (nvs_get_blob(h, "io", io, &iol) == ESP_OK && iol == sizeof io) {
+    esp_err_t ioe = nvs_get_blob(h, "io", io, &iol);
+    if (ioe == ESP_OK && iol == sizeof io) {
         for (int i = 0; i < IO_MAX; i++) {
             if (io[i].gpio < 0) continue;
             io[i].name[IO_NAME_MAX] = 0;
-            out_printf(o, "  io%-8d gpio %d, %s", i, io[i].gpio, io[i].mode == IO_PWM ? "pwm" : "binary");
+            out_printf(o, "  io%-8d gpio %d, %s", i, io[i].gpio, io_mode_name(io[i].mode));
             if (io[i].mode == IO_PWM) out_printf(o, " %u Hz", io[i].freq);
+            if (io[i].mode == IO_INPUT) out_printf(o, ", pull %s, debounce %u ms%s", io_pull_name(io[i].pull), io[i].debounce, io[i].trigger ? ", trigger" : "");
             out_printf(o, "%s%s%s\n", io[i].invert ? ", inverted" : "", io[i].name[0] ? ", name " : "", io[i].name);
         }
-    } else out_printf(o, "  %-10s (not stored: defaults)\n", "outputs");
+    } else if (ioe == ESP_ERR_NVS_INVALID_LENGTH || (ioe == ESP_OK && iol == IO_MAX * IO_CFG_V1_SIZE))
+        out_printf(o, "  %-10s stored by an older version (outputs only; save to update)\n", "io");
+    else out_printf(o, "  %-10s (not stored: defaults)\n", "io");
     dump_str(o, h, "wifi ssid", "ssid");
     static const char *const secret[][2] = { { "wifi pass", "pass" }, { "token", "token" } };
     for (int i = 0; i < 2; i++) {
@@ -358,6 +369,13 @@ const char *settings_check_wire(const char *s, wire_t *w, char *norm) { return w
 const char *settings_check_gpio(int gpio)
 {
     if (!GPIO_IS_VALID_OUTPUT_GPIO(gpio)) return "can't be an output on this chip";
+    if (s_sys_reserved & BIT64(gpio)) return "is reserved (flash/PSRAM)";
+    return NULL;
+}
+
+const char *settings_check_gpio_in(int gpio)
+{
+    if (!GPIO_IS_VALID_GPIO(gpio)) return "no such gpio on this chip";
     if (s_sys_reserved & BIT64(gpio)) return "is reserved (flash/PSRAM)";
     return NULL;
 }

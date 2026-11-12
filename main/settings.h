@@ -47,6 +47,7 @@ void      settings_apply_tz(void);          /* setenv TZ from g_set.tz; affects 
 
 /* Validation shared by every transport (console, HTTP). NULL if fine, else a short reason. */
 const char *settings_check_gpio(int gpio);
+const char *settings_check_gpio_in(int gpio);      /* the same for an input pin (input-only pins are fine) */
 const char *settings_check_loc(double lat, double lon);
 const char *settings_check_npix(long npix);
 #define WPOINT_DEFAULT 0xFFB46Bu             /* ~3000 K warm white */

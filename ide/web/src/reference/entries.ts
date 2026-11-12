@@ -24,8 +24,8 @@ export interface Entry {
   context?: 'automation';     // only in the automation program (the example compiles and runs as one)
 }
 
-export type Category = 'Buffers' | 'Filling' | 'Pixels' | 'Blending' | 'Motion' | 'Logic' | 'Math' | 'Environment' | 'Time' | 'Variables' | 'Functions' | 'Text' | 'Displays' | 'Automation';
-export const CATEGORIES: Category[] = ['Buffers', 'Filling', 'Pixels', 'Blending', 'Motion', 'Logic', 'Math', 'Environment', 'Time', 'Variables', 'Functions', 'Text', 'Displays', 'Automation'];
+export type Category = 'Buffers' | 'Filling' | 'Pixels' | 'Blending' | 'Motion' | 'Logic' | 'Math' | 'Environment' | 'Time' | 'Variables' | 'Functions' | 'Text' | 'Displays' | 'Inputs' | 'Automation';
+export const CATEGORIES: Category[] = ['Buffers', 'Filling', 'Pixels', 'Blending', 'Motion', 'Logic', 'Math', 'Environment', 'Time', 'Variables', 'Functions', 'Text', 'Displays', 'Inputs', 'Automation'];
 /** Words the compiler handles itself (not natives): documented, but not in the compiler's native table. */
 export const KEYWORDS = ['def', 'defn', 'fn', 'use'];
 
@@ -576,15 +576,46 @@ export const ENTRIES: Entry[] = [
     details: 'Only in the automation program. Outputs are configured on the board (io config, or the Board panel\'s Outputs) ' +
       'and are always off at boot; what the program sets is not saved.\n\nA name is looked up when the program compiles, so a ' +
       'misspelt or unknown output is a compile error. A name that is also a (def ...) variable means the variable. The ' +
-      'automation program runs every few seconds: setting an output to what it already is changes nothing.',
+      'automation program runs every few seconds: setting an output to what it already is changes nothing. A slot set up as ' +
+      'an input is a compile error here (read it with in or analog).',
     example: '(io-set 0 (and (ge (env hour) 7) (lt (env hour) 22)))\n(io-set 1 (if (ge (env hour) 18) 0.3 0))',
   },
   {
     name: 'io', category: 'Automation', context: 'automation', summary: 'Where a GPIO output is now, 0 to 1.',
     args: [{ name: 'out', type: 'int', desc: 'output number, or its name' }],
     returns: 'decimal 0..1 (binary outputs: 0 or 1)',
-    details: 'Only in the automation program. Reads back the last value set, by io-set, the console (io) or the API.',
+    details: 'Only in the automation program. Reads back the last value set, by io-set, the console (io) or the API. ' +
+      'For inputs use in and analog.',
     example: '(if (eq (io 0) 0) (io-set 1 0.5) (io-set 1 0))',
+  },
+
+  /* ---------------- Inputs ---------------- */
+  {
+    name: 'in', category: 'Inputs', summary: 'A digital input (button, switch, sensor): t or nil.',
+    args: [{ name: 'input', type: 'int', desc: 'slot number, or its name (set with io config <n> <gpio> input name=<name>)' }],
+    returns: 'boolean',
+    details: 'Inputs are set up on the board: io config <n> <gpio> input [pull=up|down|none] [debounce=<ms>] [trigger] ' +
+      '[invert] [name=<name>], or the Board panel. The pin is read every millisecond; a new level counts once it has ' +
+      'held for the debounce time (20 ms unless set). With the default pull-up, a button to ground reads t when ' +
+      'released and nil when pressed: add invert to turn that round.\n\nWorks in channel programs and the automation ' +
+      'program. An input marked trigger runs the automation program right after it changes, so a button can switch ' +
+      'programs at once instead of at the next scheduled run.\n\nA name is looked up when the program compiles: an ' +
+      'unknown name, or a slot that is an output or an analog input, is a compile error. In the preview, set its value ' +
+      'with the Inputs controls.',
+    example: '; red while the button is held (wired to ground, io config 2 4 input invert name=button)\n' +
+      '(if (in button) (fill (buf O) #FF0000) (fill (buf O) #000000))',
+  },
+  {
+    name: 'analog', category: 'Inputs', summary: 'An analog input (knob, light sensor) from 0 to 1, averaged.',
+    args: [{ name: 'input', type: 'int', desc: 'slot number, or its name (io config <n> <gpio> analog name=<name>)' },
+      { name: 'samples', type: 'int', desc: 'how many of the latest readings to average, 1..256 (one per ms)', optional: true, def: '16' }],
+    returns: 'decimal 0..1',
+    details: 'The board reads each analog input 1000 times a second in the background and keeps the latest 256 readings; ' +
+      'this averages the latest `samples` of them, so a larger number is steadier and slower to follow. 0 is 0 V, 1 is ' +
+      'about 3.1 V. With invert set the value is 1 minus that.\n\nAnalog inputs need an ADC1 pin: GPIO 32 to 39 on the ' +
+      'ESP32 (ADC2 can\'t run alongside WiFi), GPIO 0 to 6 on the C6. Works in channel programs and the automation ' +
+      'program. In the preview, set its value with the Inputs controls.',
+    example: '; a bar as long as the knob is turned\n(fill (buf O) #000000)\n(fill (buf O) #00FF80 0 (round (* (analog knob 64) (env npix))))',
   },
   {
     name: 'intensity', category: 'Automation', context: 'automation', summary: 'The global intensity, or a channel\'s, from 0 to 1.',

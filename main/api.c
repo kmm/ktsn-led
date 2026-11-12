@@ -130,7 +130,10 @@ api_result_t api_status(void)
         cJSON *e = cJSON_CreateObject();
         cJSON_AddNumberToObject(e, "n", i);
         cJSON_AddStringToObject(e, "name", g_set.io[i].name);
-        cJSON_AddNumberToObject(e, "value", io_get(i) / 256.0);                       /* 0..1 (binary: 0 or 1) */
+        cJSON_AddStringToObject(e, "mode", io_mode_name(g_set.io[i].mode));
+        if (g_set.io[i].mode == IO_ANALOG)                                               /* 0..1, 16 readings */
+            cJSON_AddNumberToObject(e, "value", (double)io_analog_get(i, DSL_ANALOG_SAMPLES_DEFAULT) / IO_ANALOG_FULL);
+        else cJSON_AddNumberToObject(e, "value", io_get(i) / 256.0);                    /* 0..1 (binary, input: 0 or 1) */
         cJSON_AddBoolToObject(e, "ok", io_working(i));
         cJSON_AddItemToArray(ios, e);
     }
@@ -213,10 +216,13 @@ api_result_t api_get_config(void)
         cJSON *e = cJSON_CreateObject();
         cJSON_AddNumberToObject(e, "n", i);
         cJSON_AddNumberToObject(e, "gpio", c->gpio);
-        cJSON_AddStringToObject(e, "mode", c->mode == IO_PWM ? "pwm" : "binary");
+        cJSON_AddStringToObject(e, "mode", io_mode_name(c->mode));
         cJSON_AddNumberToObject(e, "freq", c->freq);
         cJSON_AddBoolToObject(e, "invert", c->invert);
         cJSON_AddStringToObject(e, "name", c->name);
+        cJSON_AddStringToObject(e, "pull", io_pull_name(c->pull));
+        cJSON_AddNumberToObject(e, "debounce", c->debounce);
+        cJSON_AddBoolToObject(e, "trigger", c->trigger);
         cJSON_AddItemToArray(ios, e);
     }
     cJSON_AddNumberToObject(j, "io_max", IO_MAX);
@@ -378,7 +384,7 @@ api_result_t api_patch_config(const cJSON *root)
             else if (!cJSON_IsString(item)) err_at(errs, k, "must be a string or null");
             else if (strlen(item->valuestring) > SOURCE_MAX) err_at(errs, k, "too long");
             else { auto_action = 1; auto_src = item->valuestring; }
-        } else if (!strcmp(k, "io")) {                   /* {"0": {gpio, mode, freq, invert, name} | null (remove)} */
+        } else if (!strcmp(k, "io")) {   /* {"0": {gpio, mode, freq, invert, name, pull, debounce, trigger} | null (remove)} */
             if (!cJSON_IsObject(item)) { err_at(errs, k, "must be an object keyed by output number, e.g. {\"0\": {...}}"); continue; }
             const cJSON *c;
             cJSON_ArrayForEach(c, item) {
@@ -387,20 +393,31 @@ api_result_t api_patch_config(const cJSON *root)
                 snprintf(key, sizeof key, "io.%s", c->string);
                 if (!c->string[0] || *end || n < 0 || n >= IO_MAX) { err_at(errs, key, "unknown output number"); continue; }
                 io_cfg_set = true;
-                if (cJSON_IsNull(c)) { memset(&io[n], 0, sizeof io[n]); io[n].gpio = -1; io[n].freq = IO_PWM_DEFAULT_HZ; continue; }
-                if (!cJSON_IsObject(c)) { err_at(errs, key, "must be an object {gpio, mode, freq, invert, name} or null (remove)"); continue; }
+                if (cJSON_IsNull(c)) { memset(&io[n], 0, sizeof io[n]); io[n].gpio = -1; io[n].freq = IO_PWM_DEFAULT_HZ; io[n].debounce = IO_DEBOUNCE_DEFAULT; continue; }
+                if (!cJSON_IsObject(c)) { err_at(errs, key, "must be an object {gpio, mode, freq, invert, name, pull, debounce, trigger} or null (remove)"); continue; }
                 const cJSON *g = cJSON_GetObjectItemCaseSensitive(c, "gpio"), *mo = cJSON_GetObjectItemCaseSensitive(c, "mode");
                 const cJSON *fq = cJSON_GetObjectItemCaseSensitive(c, "freq"), *iv = cJSON_GetObjectItemCaseSensitive(c, "invert");
-                const cJSON *nm = cJSON_GetObjectItemCaseSensitive(c, "name");
+                const cJSON *nm = cJSON_GetObjectItemCaseSensitive(c, "name"), *pl = cJSON_GetObjectItemCaseSensitive(c, "pull");
+                const cJSON *db = cJSON_GetObjectItemCaseSensitive(c, "debounce"), *tr = cJSON_GetObjectItemCaseSensitive(c, "trigger");
                 io_cfg_t nc = io[n];
                 long v;
-                if (nc.gpio < 0 && !g) { err_at(errs, key, "a new output needs a gpio"); continue; }
+                if (nc.gpio < 0 && !g) { err_at(errs, key, "a new slot needs a gpio"); continue; }
                 if (g) { if (!json_int(g, 0, 63, &v)) { snprintf(key, sizeof key, "io.%s.gpio", c->string); err_at(errs, key, "must be an integer"); continue; } nc.gpio = (int8_t)v; }
                 if (mo) {
                     snprintf(key, sizeof key, "io.%s.mode", c->string);
-                    if (!cJSON_IsString(mo) || (strcmp(mo->valuestring, "binary") && strcmp(mo->valuestring, "pwm"))) { err_at(errs, key, "must be \"binary\" or \"pwm\""); continue; }
-                    nc.mode = strcmp(mo->valuestring, "pwm") ? IO_BINARY : IO_PWM;
+                    int m = cJSON_IsString(mo) ? io_mode_parse(mo->valuestring) : -1;
+                    if (m < 0) { err_at(errs, key, "must be \"binary\", \"pwm\", \"input\" or \"analog\""); continue; }
+                    if (m == IO_INPUT && nc.mode != IO_INPUT && !pl) nc.pull = IO_PULL_UP;   /* a new input: pull up unless told */
+                    nc.mode = (uint8_t)m;
                 }
+                if (pl) {
+                    snprintf(key, sizeof key, "io.%s.pull", c->string);
+                    int p = cJSON_IsString(pl) ? io_pull_parse(pl->valuestring) : -1;
+                    if (p < 0) { err_at(errs, key, "must be \"up\", \"down\" or \"none\""); continue; }
+                    nc.pull = (uint8_t)p;
+                }
+                if (db) { if (!json_int(db, 0, IO_DEBOUNCE_MAX, &v)) { snprintf(key, sizeof key, "io.%s.debounce", c->string); err_at(errs, key, "must be an integer 0..1000 (ms)"); continue; } nc.debounce = (uint16_t)v; }
+                if (tr) { if (!cJSON_IsBool(tr)) { snprintf(key, sizeof key, "io.%s.trigger", c->string); err_at(errs, key, "must be true or false"); continue; } nc.trigger = cJSON_IsTrue(tr); }
                 if (fq) { if (!json_int(fq, IO_FREQ_MIN, IO_FREQ_MAX, &v)) { snprintf(key, sizeof key, "io.%s.freq", c->string); err_at(errs, key, "must be an integer 1..20000 (Hz)"); continue; } nc.freq = (uint16_t)v; }
                 if (iv) { if (!cJSON_IsBool(iv)) { snprintf(key, sizeof key, "io.%s.invert", c->string); err_at(errs, key, "must be true or false"); continue; } nc.invert = cJSON_IsTrue(iv); }
                 if (nm) {
@@ -556,6 +573,7 @@ api_result_t api_patch_config(const cJSON *root)
             if (e->string[0] && !*end) slot = n >= 0 && n < IO_MAX && io[n].gpio >= 0 ? (int)n : -1;
             else for (int i = 0; i < IO_MAX; i++) if (io[i].gpio >= 0 && io[i].name[0] && !strcmp(io[i].name, e->string)) slot = i;
             if (slot < 0) { err_at(errs, key, "no such output"); continue; }
+            if (!io_mode_is_output(io[slot].mode)) { err_at(errs, key, "that is an input"); continue; }
             long v;
             if (cJSON_IsBool(e)) v = cJSON_IsTrue(e) ? UNIT_ONE : 0;
             else if (cJSON_IsNumber(e) && e->valuedouble >= 0 && e->valuedouble <= 1) v = (long)(e->valuedouble * UNIT_ONE + 0.5);

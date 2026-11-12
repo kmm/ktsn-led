@@ -82,7 +82,11 @@ static const char *host_io_set(int n, uint16_t v)
     return NULL;
 }
 
-static const dsl_host_t k_host = { host_nch, host_get, host_set, host_play, host_stop, host_exists, io_find, io_used, io_get, host_io_set, lib_source, NULL };
+_Static_assert((int)IO_BINARY == (int)DSL_IO_BINARY && (int)IO_PWM == (int)DSL_IO_PWM && (int)IO_INPUT == (int)DSL_IO_INPUT && (int)IO_ANALOG == (int)DSL_IO_ANALOG,
+               "io.h modes must match the core's DSL_IO_*");
+_Static_assert(IO_ANALOG_FULL == 65536 && IO_SAMPLES_MAX == DSL_ANALOG_SAMPLES_MAX, "io.h analog scale must match the core");
+static const dsl_host_t k_host = { host_nch, host_get, host_set, host_play, host_stop, host_exists, io_find, io_used, io_get, host_io_set, lib_source, NULL,
+                                   io_mode, io_in_get, io_analog_get };
 
 void automation_set_host(void) { dsl_set_host(&k_host); }
 

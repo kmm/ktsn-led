@@ -288,6 +288,23 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   invert, name}] + `io_max`, patch `io` {"n": {...} | null} (all-or-nothing, the final table is checked) and `io_set`
   {"n or name": bool | 0..1}, status `io` [{n, name, value, ok}]. WASM: `lc_set_io` ("n:name" lines from the connected
   board's config; offline every slot 0..7 and any name is accepted). IDE: Board panel Outputs (`ui/OutputsSection.tsx`).
+- **GPIO inputs** (0.20.0, 2026-11-12; plan agreed 2026-11-12): io slot modes `input` and `analog` next to binary/pwm
+  (`io_cfg_t` grew `pull`, `trigger`, `debounce` at the end; the NVS blob `io` of 0.19.0 and older, 22 bytes per slot,
+  is read and converted by settings.c, `_Static_assert` on `offsetof(pull)`). Inputs use `settings_check_gpio_in`
+  (input-only pins like ESP32 34..39 are fine); analog needs ADC1 (`adc_continuous_io_to_channel`; ESP32 32..39, C6
+  0..6); pull up/down is refused on pins without pull resistors (ESP32 34..39). The `inputs` task (io.c, created by io_apply on the first input, 1 ms loop) debounces digital pins (a new level
+  must hold `debounce` ms, default 20; `trigger` -> `automation_run_now`, picked up within 100 ms) and owns the ADC:
+  continuous DMA (`adc_continuous_*`, `adc_continuous_parse_data` hides the chip formats), restarted when `s_adc_gen`
+  changes (io_apply compares a signature of analog slots + pins). Rate: each input gets 1000 readings/s, each the
+  average of `s_decim` conversions (total = max(2 kHz x inputs, the chip minimum: 20 kHz on the ESP32)); a ring of 256
+  readings per slot. `(in x)` / `(analog x [samples])` are not automation-only (cached values, cheap; host hooks
+  `io_mode`, `in_get`, `analog_get`, values 0..65536 = Q16); `bind_slot` resolves names and, when the host knows the
+  mode (`io_mode` >= 0), checks the kind (io/io-set refuse inputs, in refuses analog, ...); at run time a slot whose
+  mode changed since compiling is a fault. Analog invert = 1 - v. Console `io config <n> <gpio> input|analog ...`,
+  JSON config `io[].pull/debounce/trigger`, status `io[].mode`. WASM: board slots with modes (`lc_set_io` "n:name:mode"),
+  offline each new name gets the next slot and modes are unknown (no kind checks); `lc_set_input(slot|name, v)`. IDE:
+  Board panel "Inputs and outputs" (`ui/OutputsSection.tsx`), preview Inputs controls (`core/inputs.ts`: the board's
+  input slots, offline the names the program reads), reference category Inputs.
 - **Strings** (2026-10-31; plan agreed 2026-10-30): `V_STR` / `A_STR`, value `strref_t {p, len}`, a view (not
   NUL-terminated; `str-sub` returns part of another string without copying). Literals `"..."` (one line, at most
   `DSL_STR_MAX` 255, escapes only `\"` and `\\`; the parser counts first, then copies into the AST arena: no stack
@@ -573,6 +590,9 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
     (stop <ch>)                                the channel goes dark
     (io-set <out|name> <t|nil|0..1>)           GPIO output: switch it, or a PWM level (binary: > 0 = on)
     (io <out|name>)                            where the output is now, decimal 0..1
+  Any program (channel and automation):
+    (in <in|name>)                             digital input, debounced, after invert -> bool
+    (analog <in|name> [samples])               analog input: average of the latest 1..256 readings (1/ms, default 16) -> 0..1
 `_` = use the default for an optional argument, e.g. `(slice (buf O) _ _ -1)` reverses O.
 Console: `version` (what runs, slot, unconfirmed update?, other slot), `prog <ch> <source>` (or `prog <ch>` alone: several lines, end with `.`), `list`, `env [intensity N | time YYYY-MM-DD HH:MM:SS]`, `buf <ch> <id> [start] [count]`, `stat [reset]`,
 `autoexec [run | clear | paste | <source>]`, `lib [show|rm <name> | set <name> [source] | save|run <name> <ch>]`, `intensity [<ch|all> <0..1> [fade s]]`, `automation [<source> | paste | clear | run | every <s>]`, `chan [<n> <gpio> <npix> [wire] | <n> off]`, `gamma [<ch> <1.0..3.0 | off>]`, `dither [<ch> <0..4>]`, `white [<ch> max <0..100> | <ch> mode <direct|extract|boost> | <ch> point <#RRGGBB> [ratio]]`, `output [refresh <1..4> | parallel <on|off>]`, `io [<n|name> <on|off|0..1> | config <n> <gpio> <binary|pwm> [freq=Hz] [invert] [name=x] | config <n> off]`, `wifi [<ssid> [pass] | off]`, `ntp [server]`,
@@ -648,10 +668,15 @@ Host tests: 4483 checks, 0 failures (macOS clang and gcc). **Builds cleanly with
   survives reboot, a program using `(env sunset)`/`(env sunrise)` switches correctly with the time zone. One
   calculation takes ~18 ms on the ESP32 (once a minute, in the low-priority automation task, so no frame cost).
   Not run on hardware: the API `loc` field (`tools/apitest.py` check only syntax-checked).
+- GPIO inputs (0.20.0, 2026-11-12): host-tested (`t_inputs`: names, kinds, samples, clamping, mode changed after
+  compiling, hosts without modes, automation reading inputs), IDE tests (core: offline names, board kinds; preview
+  input discovery), builds for every variant (ESP32 2 MB WiFi image 27% free after the ADC driver). **Not run on
+  hardware**: digital input + debounce + trigger, analog readings on both chips (ADC continuous mode, the ESP32's
+  20 kHz minimum), the stored `io` blob from 0.19.0 loading after the upgrade.
 - Date/time comparisons (0.19.0, 2026-11-12, `natives.c` "date and time comparisons", `bind_time_cmp`): host-tested
   (`t_time_cmp`: precision, numbers incl. sunset -1 and 24 h wrap, time-in/date-in wrapping, leap days, run-time
   strings as faults, nil without a clock, compile errors), reference entries (category Time) whose examples compile
-  and run, builds for every variant. **Not run on hardware.**
+  and run, builds for every variant. **Verified by the user on the C6** (2026-11-12).
 - Rename to KTSN LED (0.18.0, 2026-11-11): host tests, IDE tests (incl. `storageRename.test.ts`, old config/library
   files, old image name), all six variants build from the renamed folder with configs identical to before apart from
   option names; Docker IDE checked by Claude (title, saved state copied to `ktsn-led.ide.*`). **Verified by the user**
@@ -738,7 +763,7 @@ Still unverified on hardware:
     `(env sunset)` without a location, makes the test nil). `time-eq` matches at the precision given (the minute for
     "HH:MM" and numbers, the second for "HH:MM:SS"). Dates: `"MM-DD"` (every year) or `"YYYY-MM-DD"`. All of them
     are **nil while the clock isn't set** (`timeset` 0). Channel programs and automation; not folded.
-  - Phase 2, 0.20.0: io modes `input` (pull=up|down|none, invert, debounce, opt-in `trigger` = run automation right
+  - Phase 2, 0.20.0 (done 2026-11-12, see "GPIO inputs" and Status): io modes `input` (pull=up|down|none, invert, debounce, opt-in `trigger` = run automation right
     after a debounced change) and `analog` (ADC1 only: ESP32 GPIO 32..39, C6 GPIO 0..6; continuous/DMA sampling in a
     background task, ring of recent readings). `(in <name>)` -> bool, `(analog <name> [samples 1..256, default 16])` ->
     decimal 0..1 (average of the latest readings), in channel programs and automation; cached, cheap per call.

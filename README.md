@@ -101,13 +101,18 @@ and intensities (with fades). It may use G0..G7 and `env`, plus `(play ch name)`
     automation every 30      run every 30 s (1..3600, default 10; aligned to the clock), also at boot and when set
     automation               the program, runs, last run, faults; `automation run` runs it now, `automation clear`
 
-GPIO outputs (relays, PWM): up to 8, each a pin in binary (on/off) or PWM mode, optionally inverted and named. They
-are always off at boot; the console, the API and the automation program switch them (`(io-set pump t)`). The C6
-build starts with GPIO 19 and 20 as binary outputs 0 and 1.
+GPIO slots: up to 8, each a pin set up as an output (binary on/off or PWM) or an input (digital or analog),
+optionally inverted and named. Outputs are always off at boot; the console, the API and the automation program switch
+them (`(io-set pump t)`). Inputs are read in the background: any program reads them with `(in button)` (t / nil,
+debounced) or `(analog knob)` (0..1, averaged). The C6 build starts with GPIO 19 and 20 as binary outputs 0 and 1.
 
-    io                       list them, with what they are doing now
-    io 0 on | io pump off | io fan 0.4      switch, or set a PWM level 0..1
-    io config 2 4 pwm freq=500 name=fan     output 2 on GPIO 4, PWM at 500 Hz (also: invert); applies at once
+    io                       list them, with what they are doing now (input states, analog values)
+    io 0 on | io pump off | io fan 0.4      switch an output, or set a PWM level 0..1
+    io config 2 4 pwm freq=500 name=fan     slot 2: output on GPIO 4, PWM at 500 Hz (also: invert); applies at once
+    io config 3 5 input name=button         digital input (pull=up by default, or down/none; debounce=20 ms;
+                                            invert: a low pin reads t; trigger: run automation after each change;
+                                            ESP32 GPIO 34..39 have no pull resistors: pull=none + a resistor)
+    io config 4 34 analog name=knob         analog input: ADC1 pins only (ESP32 GPIO 32..39, C6 GPIO 0..6)
     io config 2 off          remove it (its pin is let go)
 
 A segment display wired as one LED strip: `seg7`, `seg9` and `seg14` draw a number or text as a mask (lit segments
@@ -191,9 +196,11 @@ field is valid; errors come back per field, e.g. `{"errors": {"channels.0.prog":
 `PATCH /api/config` with `{"automation": "<source>", "automation_every": 30}` sets the automation program (compiled
 first; null clears it); `GET /api/status` → `automation` shows runs, the last run and faults.
 
-GPIO outputs: `PATCH /api/config` with `{"io": {"2": {"gpio": 4, "mode": "pwm", "freq": 500, "invert": false,
-"name": "fan"}}}` sets one up (`null` removes it), `{"io_set": {"pump": true, "2": 0.4}}` switches or dims outputs by
-number or name. `GET /api/config` → `io` lists them, `GET /api/status` → `io` gives each one's value (0..1).
+GPIO slots: `PATCH /api/config` with `{"io": {"2": {"gpio": 4, "mode": "pwm", "freq": 500, "invert": false,
+"name": "fan"}}}` sets one up (`null` removes it); modes are `binary`, `pwm`, `input` (with `pull` up/down/none,
+`debounce` ms, `trigger`) and `analog`. `{"io_set": {"pump": true, "2": 0.4}}` switches or dims outputs by number or
+name. `GET /api/config` → `io` lists them, `GET /api/status` → `io` gives each one's mode and value (0..1; inputs 0 or
+1, analog the latest 16 readings averaged).
 
 `GET /api/lib` lists the library (`{programs: [{name, size}], used, total}`), `GET /api/lib/<name>` gives
 `{name, src}`, `PUT /api/lib/<name>` stores the body (compiled first), `DELETE /api/lib/<name>` removes it (409 with
@@ -259,6 +266,9 @@ Programs sent over HTTP may be up to 3999 characters, span several lines and con
     (seg7 <buf> <num|text> [layout] [hstride] [vstride] [digits])  7-segment display mask -> buf
     (seg9 <buf> <num|text> [layout] [hstride] [vstride] [digits])  7 + centre verticals j m -> buf
     (seg14 <buf> <num|text> [layout] [hs] [vs] [ds] [gs] [digits])  14-segment (a..f g1 g2 h j k l m n) -> buf
+    (in name|n)                                 a digital input, debounced -> boolean
+    (analog name|n [samples])                   an analog input, the latest 1..256 readings (1/ms, default 16)
+                                                averaged -> number 0..1
     automation program only:
     (play ch name) (stop ch)                    library program on a channel / dark
     (intensity [ch]) (set-intensity ch|_ v [fade s])  read / set intensity 0..1, fading

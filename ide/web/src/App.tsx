@@ -4,6 +4,7 @@ import type { BoardChannel } from './devices/types';
 import { loadDevices, saveDevices, type DeviceSpec } from './devices/store';
 import { chosenPorts, useConnection } from './devices/useConnection';
 import { Editor } from './editor/Editor';
+import { boardInputs } from './core/inputs';
 import { Preview } from './preview/Preview';
 import { findTab, isUnsent, LIB_NAME, loadTabs, newTab, saveTabs, tabTitle, type EditorTab, type TabKind, type TabsState } from './tabs/tabs';
 import { useTheme } from './theme';
@@ -164,11 +165,13 @@ export function App() {
     return () => { stop = true; };
   }, [core, conn.transport, libVersion, useRoots, offlinePrograms]);
 
-  // (io ...) outputs in automation tabs are checked against the connected board's (any slot and name when offline).
+  // The preview's input controls: the connected board's input slots (offline: the program's own names).
+  const boardIns = useMemo(() => (conn.transport && conn.config?.io ? boardInputs(conn.config.io) : undefined), [conn.transport, conn.config]);
+  // (io / in / analog ...) slots are checked against the connected board's (any slot and name when offline).
   useEffect(() => {
     if (!core) return;
     const io = conn.transport ? conn.config?.io : undefined;
-    core.setOutputs(io ? io.map((o) => ({ n: o.n, name: o.name })) : null);
+    core.setOutputs(io ? io.map((o) => ({ n: o.n, name: o.name, mode: o.mode })) : null);
   }, [core, conn.transport, conn.config]);
 
   // Whenever the connected board's config is known, record what it runs, so tabs show whether they differ.
@@ -502,7 +505,7 @@ export function App() {
               chanIntensityHint={tabConnected && active.kind === 'program' ? conn.config!.channels[active.ch]?.intensity : undefined}
               locHint={tabConnected ? conn.config!.loc : undefined}
               whiteHint={whiteOf(tabConnected && active.kind === 'program' ? conn.config!.channels[active.ch] : undefined)}
-              autoexec={pAuto} />
+              autoexec={pAuto} inputsHint={boardIns} />
           </div>
           <div className="tab-body" hidden={side !== 'board'}>
             <BoardPanel conn={conn} deviceName={device?.name ?? ''} visible={side === 'board'}

@@ -26,7 +26,7 @@ endif()
 
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "."
-                       REQUIRES dsl console esp_timer esp_driver_rmt esp_driver_parlio esp_driver_gpio esp_driver_ledc esp_driver_usb_serial_jtag led_strip nvs_flash app_update
+                       REQUIRES dsl console esp_timer esp_driver_rmt esp_driver_parlio esp_driver_gpio esp_driver_ledc esp_adc esp_driver_usb_serial_jtag led_strip nvs_flash app_update
                                 esp_wifi esp_netif esp_event lwip esp_http_server espressif__cjson espressif__mdns)
 
 # The serial REPL's raw line, for program source with "strings" (cmd.c: __wrap_esp_console_split_argv)

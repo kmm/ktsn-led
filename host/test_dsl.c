@@ -1924,7 +1924,7 @@ static const char *fio_set(int n, uint16_t v) { fio[n] = n == 0 ? (v ? 256 : 0) 
 static void t_io(channel_t *ch)
 {
     char e[DSL_ERR_LEN];
-    static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, fio_find, fio_used, fio_get, fio_set, NULL, NULL };
+    static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, fio_find, fio_used, fio_get, fio_set, NULL, NULL, NULL, NULL, NULL };
     CHECK(channel_set_source(ch, "(io-set 0 t)", e, sizeof e) != 0 && strstr(e, "only works in the automation program"));
     ch->ctx = DSL_CTX_AUTOMATION;
     dsl_set_host(NULL);
@@ -1950,10 +1950,94 @@ static void t_io(channel_t *ch)
     ch->ctx = DSL_CTX_RENDER;
 }
 
+/* inputs: slot 4 "button" (digital), 5 "knob" (analog); fin_mode lets a test change a slot's mode behind a program */
+static bool     fin_button;
+static uint32_t fin_knob;
+static int      fin_samples, fin_mode4 = DSL_IO_INPUT;
+static int  fin_find(const char *n) { return !strcmp(n, "button") ? 4 : !strcmp(n, "knob") ? 5 : fio_find(n); }
+static bool fin_used(int n) { return fio_used(n) || n == 4 || n == 5; }
+static int  fin_mode(int n) { return n == 0 ? DSL_IO_BINARY : n == 2 ? DSL_IO_PWM : n == 4 ? fin_mode4 : n == 5 ? DSL_IO_ANALOG : -1; }
+static bool fin_get(int n) { return n == 4 && fin_button; }
+static uint32_t fin_analog(int n, int samples) { fin_samples = samples; return n == 5 ? fin_knob : 0; }
+
+static void t_inputs(channel_t *ch)
+{
+    char e[DSL_ERR_LEN];
+    static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, fin_find, fin_used, fio_get, fio_set,
+                                     NULL, NULL, fin_mode, fin_get, fin_analog };
+    dsl_set_host(NULL);
+    CHECK(channel_set_source(ch, "(in button)", e, sizeof e) != 0 && strstr(e, "no input by that name"));   /* no host: no names */
+    ch->perf.faults = 0;
+    CHECK(run(ch, "(if (in 0) (fill (buf O) #FFFFFF))", e) == 0 && ch->perf.faults == 1 && strstr(ch->perf.last_err, "inputs aren't available"));
+    dsl_set_host(&host);
+    ch->perf.faults = 0;
+    /* channel programs read inputs (not automation-only) */
+    fin_button = true;
+    CHECK(dsl_true(ch, "(in button)") && dsl_true(ch, "(in 4)"));
+    fin_button = false;
+    CHECK(!dsl_true(ch, "(in button)") && dsl_true(ch, "(not (in button))"));
+    fin_knob = 32768;
+    CHECK(dsl_true(ch, "(eq (analog knob) 0.5)") && fin_samples == DSL_ANALOG_SAMPLES_DEFAULT);
+    CHECK(dsl_true(ch, "(eq (analog knob 64) 0.5)") && fin_samples == 64);
+    CHECK(dsl_true(ch, "(eq (analog knob _) 0.5)") && fin_samples == DSL_ANALOG_SAMPLES_DEFAULT);
+    CHECK(dsl_true(ch, "(eq (analog 5 1) 0.5)") && fin_samples == 1);
+    fin_knob = 65536;
+    CHECK(dsl_true(ch, "(eq (analog knob 256) 1)") && fin_samples == 256);
+    fin_knob = 70000;                                                    /* a host out of range is clamped to 1 */
+    CHECK(dsl_true(ch, "(eq (analog knob) 1)"));
+    fin_knob = 0;
+    CHECK(dsl_true(ch, "(eq (analog knob) 0)"));
+    env = (env_t){ .second = 0, .intensity = 256 };
+    CHECK(dsl_true(ch, "(eq (analog knob (env second)) 0)") && fin_samples == 1);   /* run time: clamped to 1..256 */
+    env.second = 59;
+    CHECK(run(ch, "(def k (* (env second) 10)) (if (eq (analog knob k) 0) (fill (buf O) #FFFFFF))", e) == 0 && fin_samples == 256);
+    env = (env_t){ .intensity = 256 };
+    fin_knob = 16384;                                                    /* scale a bar with a knob */
+    CHECK(run(ch, "(fill (buf O) #000000) (fill (buf O) #FF0000 0 (round (* (analog knob) (env npix))))", e) == 0);
+    CHECK(ch->buf[BUF_O][1] == 0xFF0000 && ch->buf[BUF_O][3] == 0);      /* 10 pixels * 0.25 = 2.5 -> 3 */
+    CHECK(ch->perf.faults == 0);
+    /* compile errors: names, kinds, samples */
+    struct { const char *src, *want; } bad[] = {
+        { "(in buton)", "no input by that name" },             { "(analog knb)", "no analog input by that name" },
+        { "(in knob)", "that is an analog input, not an input" }, { "(analog button)", "that is a digital input, not an analog input" },
+        { "(in pump)", "that is an output, not an input" },      { "(analog fan)", "that is an output, not an analog input" },
+        { "(in 1)", "no such input" },                           { "(analog knob 0)", "samples must be 1..256" },
+        { "(analog knob 257)", "samples must be 1..256" },       { "(analog knob 0.5)", NULL },
+        { "(in)", NULL },                                        { "(in button 1)", NULL },
+        { "(if (in button 1) 0)", NULL },                        { "(fill (buf O) (in button))", NULL },
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        bool failed = channel_set_source(ch, bad[i].src, e, sizeof e) != 0;
+        CHECK(failed && (!bad[i].want || strstr(e, bad[i].want)));
+        if (!failed || (bad[i].want && !strstr(e, bad[i].want))) printf("  %s -> %s\n", bad[i].src, failed ? e : "(compiled)");
+    }
+    /* outputs refuse inputs, at compile time and (when the slot changes later) at run time */
+    ch->ctx = DSL_CTX_AUTOMATION;
+    CHECK(channel_set_source(ch, "(io-set button t)", e, sizeof e) != 0 && strstr(e, "that is a digital input: read it with (in x)"));
+    CHECK(channel_set_source(ch, "(io knob)", e, sizeof e) != 0 && strstr(e, "that is an analog input"));
+    CHECK(run(ch, "(if (in button) (io-set pump t) (io-set pump nil))", e) == 0 && fio[0] == 0);   /* automation reads inputs too */
+    fin_button = true;
+    CHECK(run(ch, "(if (in button) (io-set pump t) (io-set pump nil))", e) == 0 && fio[0] == 256);
+    ch->ctx = DSL_CTX_RENDER;
+    CHECK(channel_set_source(ch, "(if (in button) (fill (buf O) #FFFFFF))", e, sizeof e) == 0);
+    fin_mode4 = DSL_IO_BINARY;                                           /* slot 4 became an output after compiling */
+    ch->perf.faults = 0;
+    channel_render(ch);
+    CHECK(ch->perf.faults == 1 && strstr(ch->perf.last_err, "not a digital input now"));
+    fin_mode4 = DSL_IO_INPUT;
+    ch->perf.faults = 0;
+    /* a host that doesn't know modes (the IDE offline): names resolve, kinds aren't checked */
+    static const dsl_host_t loose = { .io_find = fin_find, .io_used = fin_used, .in_get = fin_get, .analog_get = fin_analog };
+    dsl_set_host(&loose);
+    CHECK(channel_set_source(ch, "(if (in knob) (fill (buf O) #FFFFFF))", e, sizeof e) == 0);
+    CHECK(dsl_true(ch, "(not (in knob))") && ch->perf.faults == 0);
+    dsl_set_host(NULL);
+}
+
 static void t_automation(channel_t *ch)
 {
     char e[DSL_ERR_LEN];
-    static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, NULL, NULL, NULL, NULL, NULL, NULL };
+    static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
     /* render programs: automation natives are a compile error */
     CHECK(channel_set_source(ch, "(play 0 sunset)", e, sizeof e) != 0 && strstr(e, "only works in the automation program"));
     CHECK(channel_set_source(ch, "(fill (buf O) #FF0000) (set-intensity 0 0.5)", e, sizeof e) != 0);
@@ -2361,7 +2445,7 @@ int main(void)
 {
     CHECK(globals_init(&globals, 10) == 0);
     with_channel(t_fill); with_channel(t_scale_and_persistence); with_channel(t_invert); with_channel(t_nesting_globals);
-    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); t_astro(); with_channel(t_errors); with_channel(t_swap_atomic);
+    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); t_astro(); with_channel(t_errors); with_channel(t_swap_atomic);
     t_arena(); t_ws_parallel(); t_gamma(); t_dither(); t_wire(); t_wire_white(); t_wire_wmode(); t_fader(); t_intensity16(); t_px_scale_exhaustive(); t_blend_math(); t_stats();
     for (int i = 0; i < DSL_NUM_GLOBALS; i++) free(globals.buf[i]);
     printf("%d checks, %d failed\n", g_checks, g_fail);

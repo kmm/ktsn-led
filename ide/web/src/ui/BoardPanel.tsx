@@ -315,7 +315,7 @@ export function BoardPanel({ conn, deviceName, visible, onOpenProgram, onOpenAut
 
       {config.io !== undefined && (
         <>
-          <h3>Outputs</h3>
+          <h3>Inputs and outputs</h3>
           <OutputsSection t={t} config={config} status={status} act={act} refresh={conn.refreshConfig}
             pollNow={() => { t.status().then(setStatus, () => {}); }} />
         </>

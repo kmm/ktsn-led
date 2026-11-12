@@ -609,24 +609,31 @@ static int cmd_output(cmd_out_t *o, int argc, char **argv)
     return 0;
 }
 
-/* Output slot by number or name, or -1 (with a message). */
+/* Slot by number or name, or -1 (with a message). */
 static int io_arg(cmd_out_t *o, const char *s)
 {
     char *end;
     long n = strtol(s, &end, 10);
     if (s[0] && !*end) {
         if (n >= 0 && n < IO_MAX && io_used((int)n)) return (int)n;
-        out_printf(o, "no output %s (io to list them)\n", s);
+        out_printf(o, "no slot %s (io to list them)\n", s);
         return -1;
     }
     int k = io_find(s);
-    if (k < 0) out_printf(o, "no output named %s (io to list them)\n", s);
+    if (k < 0) out_printf(o, "nothing named %s (io to list them)\n", s);
     return k;
 }
 
-/* io | io <n|name> <on|off|0..1> | io config <n> <gpio> <binary|pwm> [freq=<Hz>] [invert] [name=<name>] | io config <n> off
- * GPIO outputs (relays, PWM). Values apply at once and aren't saved (outputs are always off at boot); the
- * configuration applies at once and `save` keeps it. Outputs whose setup didn't change keep running. */
+static void print_unit(cmd_out_t *o, uint32_t v, uint32_t full)
+{
+    unsigned p = (unsigned)((v * 100ull + full / 2) / full);
+    out_printf(o, "%u.%02u", p / 100, p % 100);
+}
+
+/* io | io <n|name> <on|off|0..1> | io config <n> <gpio> <mode> [options] | io config <n> off
+ * GPIO slots: outputs (binary relays, pwm) and inputs (digital, analog). Output values apply at once and aren't saved
+ * (outputs are always off at boot); the configuration applies at once and `save` keeps it. Slots whose setup didn't
+ * change keep running. */
 static int cmd_io(cmd_out_t *o, int argc, char **argv)
 {
     if (argc == 1) {
@@ -635,23 +642,28 @@ static int cmd_io(cmd_out_t *o, int argc, char **argv)
             const io_cfg_t *c = &g_set.io[i];
             if (c->gpio < 0) continue;
             shown++;
-            out_printf(o, "  %d%s%s: gpio %d, %s", i, c->name[0] ? " " : "", c->name, c->gpio, c->mode == IO_PWM ? "pwm" : "binary");
+            out_printf(o, "  %d%s%s: gpio %d, %s", i, c->name[0] ? " " : "", c->name, c->gpio, io_mode_name(c->mode));
             if (c->mode == IO_PWM) out_printf(o, " %u Hz", c->freq);
+            if (c->mode == IO_INPUT) out_printf(o, ", pull %s, debounce %u ms%s", io_pull_name(c->pull), c->debounce, c->trigger ? ", trigger" : "");
             if (c->invert) out_printf(o, ", inverted");
-            uint16_t v = io_get(i);
-            if (!io_working(i)) out_printf(o, ": not working (see the log)\n");
-            else if (c->mode == IO_BINARY) out_printf(o, ": %s\n", v ? "on" : "off");
-            else { unsigned p = (v * 100u + 128u) / 256u; out_printf(o, ": %u.%02u\n", p / 100, p % 100); }
+            if (!io_working(i)) { out_printf(o, ": not working (see the log)\n"); continue; }
+            switch (c->mode) {
+            case IO_BINARY: out_printf(o, ": %s\n", io_get(i) ? "on" : "off"); break;
+            case IO_INPUT:  out_printf(o, ": %s\n", io_in_get(i) ? "on" : "off"); break;
+            case IO_ANALOG: out_printf(o, ": "); print_unit(o, io_analog_get(i, DSL_ANALOG_SAMPLES_DEFAULT), IO_ANALOG_FULL); out_printf(o, "\n"); break;
+            default:        out_printf(o, ": "); print_unit(o, io_get(i), 256); out_printf(o, "\n"); break;
+            }
         }
-        if (!shown) out_puts(o, "no outputs configured (io config <n> <gpio> <binary|pwm>)");
+        if (!shown) out_puts(o, "nothing configured (io config <n> <gpio> <binary|pwm|input|analog>)");
         return 0;
     }
-    const char *usage = "usage: io | io <n|name> <on|off|0..1> | io config <n> <gpio> <binary|pwm> [freq=<Hz>] [invert] [name=<name>] | io config <n> off";
+    const char *usage = "usage: io | io <n|name> <on|off|0..1> | io config <n> <gpio> <binary|pwm|input|analog> [freq=<Hz>] "
+                        "[invert] [name=<name>] [pull=up|down|none] [debounce=<ms>] [trigger] | io config <n> off";
     if (!strcmp(argv[1], "config")) {
         if (argc < 4) { out_puts(o, usage); return 1; }
         char *end;
         long n = strtol(argv[2], &end, 10);
-        if (!argv[2][0] || *end || n < 0 || n >= IO_MAX) { out_printf(o, "output must be 0..%d\n", IO_MAX - 1); return 1; }
+        if (!argv[2][0] || *end || n < 0 || n >= IO_MAX) { out_printf(o, "slot must be 0..%d\n", IO_MAX - 1); return 1; }
         io_cfg_t io[IO_MAX];
         memcpy(io, g_set.io, sizeof io);
         io_cfg_t *c = &io[n];
@@ -659,6 +671,7 @@ static int cmd_io(cmd_out_t *o, int argc, char **argv)
             memset(c, 0, sizeof *c);
             c->gpio = -1;
             c->freq = IO_PWM_DEFAULT_HZ;
+            c->debounce = IO_DEBOUNCE_DEFAULT;
         } else {
             if (argc < 5) { out_puts(o, usage); return 1; }
             long gpio = strtol(argv[3], &end, 10);
@@ -667,26 +680,43 @@ static int cmd_io(cmd_out_t *o, int argc, char **argv)
             memset(&nc, 0, sizeof nc);
             nc.gpio = (int8_t)gpio;
             nc.freq = c->gpio >= 0 && c->mode == IO_PWM ? c->freq : IO_PWM_DEFAULT_HZ;
-            if (!strcmp(argv[4], "binary")) nc.mode = IO_BINARY;
-            else if (!strcmp(argv[4], "pwm")) nc.mode = IO_PWM;
-            else { out_puts(o, "mode is binary or pwm"); return 1; }
+            nc.debounce = IO_DEBOUNCE_DEFAULT;
+            int m = io_mode_parse(argv[4]);
+            if (m < 0) { out_puts(o, "mode is binary, pwm, input or analog"); return 1; }
+            nc.mode = (uint8_t)m;
+            if (m == IO_INPUT) nc.pull = IO_PULL_UP;
             for (int k = 5; k < argc; k++) {
-                if (!strcmp(argv[k], "invert")) nc.invert = 1;
-                else if (!strncmp(argv[k], "freq=", 5)) {
-                    long f = strtol(argv[k] + 5, &end, 10);
-                    if (!argv[k][5] || *end || f < IO_FREQ_MIN || f > IO_FREQ_MAX) { out_puts(o, "freq must be 1..20000 (Hz)"); return 1; }
-                    nc.freq = (uint16_t)f;
-                } else if (!strncmp(argv[k], "name=", 5)) {
-                    const char *why = io_check_name(argv[k] + 5);
+                const char *a = argv[k];
+                if (!strcmp(a, "invert")) nc.invert = 1;
+                else if (!strncmp(a, "name=", 5)) {
+                    const char *why = io_check_name(a + 5);
                     if (why) { out_puts(o, why); return 1; }
-                    snprintf(nc.name, sizeof nc.name, "%s", argv[k] + 5);
-                } else { out_printf(o, "unknown option %s (freq=<Hz>, invert, name=<name>)\n", argv[k]); return 1; }
+                    snprintf(nc.name, sizeof nc.name, "%s", a + 5);
+                } else if (!strncmp(a, "freq=", 5) && m == IO_PWM) {
+                    long f = strtol(a + 5, &end, 10);
+                    if (!a[5] || *end || f < IO_FREQ_MIN || f > IO_FREQ_MAX) { out_puts(o, "freq must be 1..20000 (Hz)"); return 1; }
+                    nc.freq = (uint16_t)f;
+                } else if (!strncmp(a, "pull=", 5) && m == IO_INPUT) {
+                    int p = io_pull_parse(a + 5);
+                    if (p < 0) { out_puts(o, "pull is up, down or none"); return 1; }
+                    nc.pull = (uint8_t)p;
+                } else if (!strncmp(a, "debounce=", 9) && m == IO_INPUT) {
+                    long d = strtol(a + 9, &end, 10);
+                    if (!a[9] || *end || d < 0 || d > IO_DEBOUNCE_MAX) { out_puts(o, "debounce must be 0..1000 (ms)"); return 1; }
+                    nc.debounce = (uint16_t)d;
+                } else if (!strcmp(a, "trigger") && m == IO_INPUT) nc.trigger = 1;
+                else {
+                    out_printf(o, "unknown option %s for %s (%s)\n", a, argv[4],
+                               m == IO_PWM ? "freq=<Hz>, invert, name=<name>" : m == IO_INPUT ? "pull=up|down|none, debounce=<ms>, trigger, invert, name=<name>"
+                               : "invert, name=<name>");
+                    return 1;
+                }
             }
             *c = nc;
         }
         int bad;
         const char *why = io_check(io, &bad);
-        if (why) { out_printf(o, "output %d: %s\n", bad, why); return 1; }
+        if (why) { out_printf(o, "slot %d: %s\n", bad, why); return 1; }
         memcpy(g_set.io, io, sizeof io);
         io_apply();
         out_puts(o, "ok (save to persist)");
@@ -695,6 +725,7 @@ static int cmd_io(cmd_out_t *o, int argc, char **argv)
     if (argc != 3) { out_puts(o, usage); return 1; }
     int n = io_arg(o, argv[1]);
     if (n < 0) return 1;
+    if (!io_mode_is_output(g_set.io[n].mode)) { out_puts(o, "that is an input (io lists its value)"); return 1; }
     int v = !strcmp(argv[2], "on") ? UNIT_ONE : !strcmp(argv[2], "off") ? 0 : parse_unit(argv[2]);
     if (v < 0) { out_puts(o, "value is on, off or 0..1"); return 1; }
     const char *why = io_set(n, (uint16_t)v);
@@ -880,7 +911,7 @@ const cmd_def_t g_cmds[] = {
     { "intensity", "Intensity: intensity | intensity <ch|all> <0..1> [fade seconds]  (all = global; applies at once)", cmd_intensity },
     { "lib",      "Program library: lib | lib show|rm <name> | lib set <name> [source] | lib save|run <name> <ch>", cmd_lib },
     { "white",    "White (W): white | white <ch> max <0..100> | mode <direct|extract|boost> | point <#RRGGBB> [ratio]  (at once)", cmd_white },
-    { "io",       "GPIO outputs: io | io <n|name> <on|off|0..1> | io config <n> <gpio> <binary|pwm> [freq=Hz] [invert] [name=x] | io config <n> off", cmd_io },
+    { "io",       "GPIO outputs and inputs: io | io <n|name> <on|off|0..1> | io config <n> <gpio> <binary|pwm|input|analog> [freq=Hz] [invert] [name=x] [pull=up|down|none] [debounce=ms] [trigger] | io config <n> off", cmd_io },
     { "output",   "Output stage: output | output refresh <1..4> (sends per frame) | output parallel <on|off>  (at once)", cmd_output },
 #if CONFIG_KTSN_WIFI
     { "wifi",     "WiFi: wifi | wifi <ssid> [password] | wifi off", cmd_wifi },

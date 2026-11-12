@@ -1370,16 +1370,42 @@ static value_t n_stop(exec_ctx_t *c, const value_t *a, uint8_t n)
 /* ---- GPIO outputs: (io out) and (io-set out value), out = a slot number or the output's name ---- */
 
 /* A name is turned into its slot number when the program compiles, so a typo is a compile error. */
-static const char *bind_io(node_t *n, uint8_t *bad)
+/* The slot argument of io / io-set / in / analog: a bare name becomes the slot number at compile time; a constant
+ * slot must exist; when the host knows the slot's mode it must be the kind the native works with. */
+enum { WANT_OUTPUT, WANT_INPUT, WANT_ANALOG };
+static const char *bind_slot(node_t *n, int want)
 {
+    static const char *const what[] = { "output", "input", "analog input" };
+    static char msg[64];                  /* compiles are serialized (cmd_lock on a board, one thread in WASM) */
     arg_t *o = &n->args[0];
-    *bad = 0;
     if (!o->node && o->val.type == V_SYM) {
         int slot = s_host && s_host->io_find ? s_host->io_find(o->val.u.sym) : -1;
-        if (slot < 0) return "no output by that name (io to list them)";
+        if (slot < 0) { snprintf(msg, sizeof msg, "no %s by that name (io to list them)", what[want]); return msg; }
         o->val.type = V_INT;
         o->val.u.i = slot;
-    } else if (!o->node && s_host && s_host->io_used && !s_host->io_used(o->val.u.i)) return "no such output (io to list them)";
+    } else if (!o->node && s_host && s_host->io_used && !s_host->io_used(o->val.u.i)) {
+        snprintf(msg, sizeof msg, "no such %s (io to list them)", what[want]);
+        return msg;
+    }
+    int m = !o->node && s_host && s_host->io_mode ? s_host->io_mode(o->val.u.i) : -1;
+    if (m >= 0) {
+        bool ok = want == WANT_OUTPUT ? (m == DSL_IO_BINARY || m == DSL_IO_PWM) : want == WANT_INPUT ? m == DSL_IO_INPUT : m == DSL_IO_ANALOG;
+        if (!ok) {
+            static const char *const hint[] = { "read it with (in x) or (analog x)", "", "" };
+            const char *mode = m == DSL_IO_INPUT ? "a digital input" : m == DSL_IO_ANALOG ? "an analog input" : "an output";
+            if (want == WANT_OUTPUT) snprintf(msg, sizeof msg, "that is %s: %s", mode, hint[0]);
+            else snprintf(msg, sizeof msg, "that is %s, not an %s", mode, what[want]);
+            return msg;
+        }
+    }
+    return NULL;
+}
+
+static const char *bind_io(node_t *n, uint8_t *bad)
+{
+    *bad = 0;
+    const char *why = bind_slot(n, WANT_OUTPUT);
+    if (why) return why;
     if (n->nargs > 1) {
         uint8_t t = arg_type(&n->args[1]);
         *bad = 1;
@@ -1391,7 +1417,50 @@ static const char *bind_io(node_t *n, uint8_t *bad)
 static const char *check_io(int32_t n)
 {
     if (!s_host || !s_host->io_used || !s_host->io_get || !s_host->io_set) return "outputs aren't available here";
-    return s_host->io_used(n) ? NULL : "no such output";
+    if (!s_host->io_used(n)) return "no such output";
+    int m = s_host->io_mode ? s_host->io_mode(n) : -1;
+    return m == DSL_IO_INPUT || m == DSL_IO_ANALOG ? "that is an input now (io-set/io are for outputs)" : NULL;
+}
+
+/* (in x) -> t / nil: a digital input, debounced, after invert. Fine in channel programs: it reads a cached value. */
+static const char *bind_in(node_t *n, uint8_t *bad) { *bad = 0; return bind_slot(n, WANT_INPUT); }
+static value_t n_in(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    (void)n;
+    int32_t s = a[0].u.i;
+    if (!s_host || !s_host->in_get || !s_host->io_used) { c->err = "inputs aren't available here"; return boolv(false); }
+    if (!s_host->io_used(s)) { c->err = "no such input"; return boolv(false); }
+    int m = s_host->io_mode ? s_host->io_mode(s) : DSL_IO_INPUT;
+    if (m >= 0 && m != DSL_IO_INPUT) { c->err = "that is not a digital input now"; return boolv(false); }
+    return boolv(s_host->in_get(s));
+}
+
+/* (analog x [samples]) -> decimal 0..1: the average of the latest `samples` readings (one per ms; default 16). */
+static const char *bind_analog(node_t *n, uint8_t *bad)
+{
+    *bad = 0;
+    const char *why = bind_slot(n, WANT_ANALOG);
+    if (why) return why;
+    if (n->nargs > 1 && !n->args[1].node && n->args[1].val.type == V_INT
+        && (n->args[1].val.u.i < 1 || n->args[1].val.u.i > DSL_ANALOG_SAMPLES_MAX)) {
+        *bad = 1;
+        return "analog: samples must be 1..256";
+    }
+    return NULL;
+}
+static value_t n_analog(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    int32_t s = a[0].u.i, k = opt_int(a, n, 1, DSL_ANALOG_SAMPLES_DEFAULT);
+    value_t v = { .type = V_FIX };
+    if (!s_host || !s_host->analog_get || !s_host->io_used) { c->err = "inputs aren't available here"; return v; }
+    if (!s_host->io_used(s)) { c->err = "no such input"; return v; }
+    int m = s_host->io_mode ? s_host->io_mode(s) : DSL_IO_ANALOG;
+    if (m >= 0 && m != DSL_IO_ANALOG) { c->err = "that is not an analog input now"; return v; }
+    if (k < 1) k = 1;
+    if (k > DSL_ANALOG_SAMPLES_MAX) k = DSL_ANALOG_SAMPLES_MAX;
+    uint32_t r = s_host->analog_get(s, (int)k);
+    v.u.i = (int32_t)(r > 65536 ? 65536 : r);
+    return v;
 }
 
 /* (io out) -> where the output is: 0..1 (binary: 0 or 1) */
@@ -1647,6 +1716,8 @@ static const native_def_t k_natives[] = {
     { "stop",          n_stop,          V_NIL, 1, 1, { A_INT },                     NF_AUTOMATION, NULL },
     { "io",            n_io,            V_FIX, 1, 1, { A_INT },                     NF_AUTOMATION | NF_IDARG, bind_io },
     { "io-set",        n_io_set,        V_NIL, 2, 2, { A_INT, A_ANY },              NF_AUTOMATION | NF_IDARG, bind_io },
+    { "in",            n_in,            V_BOOL, 1, 1, { A_INT },                    NF_IDARG, bind_in },
+    { "analog",        n_analog,        V_FIX, 1, 2, { A_INT, A_INT },              NF_IDARG, bind_analog },
 };
 
 int dsl_native_count(void) { return (int)(sizeof k_natives / sizeof k_natives[0]); }

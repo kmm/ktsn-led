@@ -61,6 +61,38 @@ describe('rendering', () => {
   });
 });
 
+describe('inputs', () => {
+  afterEach(() => core.setOutputs(null));
+  it('reads preview values by name offline, each name its own slot', () => {
+    core.setOutputs(null);
+    expect(core.load('(fill (buf O) #000000) (if (in button) (fill (buf O) #FF0000 0 2)) (fill (buf O) #0000FF 5 (+ 5 (round (* (analog knob) 5))))')).toBeNull();
+    core.setInput('button', true);
+    core.setInput('knob', 0.4);
+    core.render(env());
+    let o = core.buffer('O');
+    expect([o[0], o[2], o[5], o[6], o[7]]).toEqual([0xff0000, 0, 0x0000ff, 0x0000ff, 0]);
+    core.setInput('button', false);
+    core.setInput('knob', 1);
+    core.render(env(2));
+    o = core.buffer('O');
+    expect([o[0], o[9]]).toEqual([0, 0x0000ff]);
+    expect(core.faults()).toBe(0);
+  });
+  it("checks a board's slots and their kinds", () => {
+    core.setOutputs([{ n: 0, name: 'pump', mode: 'binary' }, { n: 3, name: 'button', mode: 'input' }, { n: 4, name: 'knob', mode: 'analog' }]);
+    expect(core.check('(in button)')).toBeNull();
+    expect(core.check('(analog knob 32)')).toBeNull();
+    expect(core.check('(in knob)')?.text).toMatch(/analog input, not an input/);
+    expect(core.check('(in pump)')?.text).toMatch(/an output, not an input/);
+    expect(core.check('(in buttn)')?.text).toMatch(/no input by that name/);
+    expect(core.check('(io-set button t)', 'automation')?.text).toMatch(/digital input: read it with/);
+    expect(core.load('(if (in 3) (fill (buf O) #00FF00) (fill (buf O) #000000))')).toBeNull();
+    core.setInput(3, true);
+    core.render(env());
+    expect(core.buffer('O')[0]).toBe(0x00ff00);
+  });
+});
+
 describe('use', () => {
   const lib = '(defn half (x:decimal) (* x 0.5))';
   afterEach(() => core.setUseSources(new Map()));

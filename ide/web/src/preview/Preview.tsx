@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BUFFER_NAMES, type BufferName, type CompileError, type Core, DEFAULT_WHITE, type WhiteSettings } from '../core/ktsnLed';
 import { averageSends, envAt, FRAME_HZ, type Location, pixelCss, pixelCssVia, pixelCssWhite, screenTable, skyClock } from '../core/env';
+import { inputsInSource, type PreviewInput } from '../core/inputs';
 
 interface Props {
   core: Core;
@@ -23,6 +24,8 @@ interface Props {
   locHint?: Location | null;
   /** Autoexec the preview uses: run on Reset, and at once whenever `version` changes (an autoexec tab was saved). */
   autoexec: { src: string; from: string; version: number } | null;
+  /** The connected board's inputs (undefined: no board, so the program's own (in x) / (analog x) names are listed). */
+  inputsHint?: PreviewInput[];
 }
 
 type ClockMode = 'real' | 'sim';
@@ -43,7 +46,7 @@ function parseLocation(lat: string, lon: string): Location | null {
 }
 const hhmm = (m: number) => (m < 0 ? 'none' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`);
 
-export function Preview({ core, program, programVersion, onLoad, npixHint, gammaHint, ditherHint, refreshHint, whiteHint, chanIntensityHint, locHint, autoexec }: Props) {
+export function Preview({ core, program, programVersion, onLoad, npixHint, gammaHint, ditherHint, refreshHint, whiteHint, chanIntensityHint, locHint, autoexec, inputsHint }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [npix, setNpix] = useState(50);
   const [playing, setPlaying] = useState(true);
@@ -58,6 +61,15 @@ export function Preview({ core, program, programVersion, onLoad, npixHint, gamma
   const table = useMemo(() => screenTable(ledLight), [ledLight]);
   const [view, setView] = useState<BufferName>('O');
   const [clock, setClock] = useState<ClockMode>('real');
+  // Inputs: stand-in values the program reads with (in x) / (analog x); the board's own values aren't polled.
+  const inputs = useMemo(() => inputsHint ?? inputsInSource(program ?? ''), [inputsHint, program]);
+  const [inVals, setInVals] = useState<Record<string, number>>({});
+  useEffect(() => {
+    for (const i of inputs) {
+      const v = inVals[i.key] ?? 0;
+      core.setInput(/^\d+$/.test(i.key) ? +i.key : i.key, i.kind === 'digital' ? v !== 0 : v);
+    }
+  }, [core, inputs, inVals, programVersion]);
   const [simStart, setSimStart] = useState(() => localInputValue(new Date()));
   const [autoexecMsg, setAutoexecMsg] = useState('');
   const [latLon, setLatLon] = useState<[string, string]>(() => {
@@ -243,6 +255,16 @@ export function Preview({ core, program, programVersion, onLoad, npixHint, gamma
         <label title="Degrees, east positive.">Lon
           <input type="number" min={-180} max={180} step="any" value={latLon[1]} onChange={(e) => setLatLon([latLon[0], e.target.value])} /></label>
       </div>
+      {inputs.length > 0 && (
+        <div className="controls preview-inputs">
+          <span className="muted" title={inputsHint ? "The connected board's inputs, with values set here (not read from the board)" : 'Inputs the program reads, with values set here'}>Inputs</span>
+          {inputs.map((i) => i.kind === 'digital'
+            ? <label key={i.key} className="check" title={`(in ${i.key})`}><input type="checkbox" checked={(inVals[i.key] ?? 0) !== 0}
+                onChange={(e) => setInVals({ ...inVals, [i.key]: e.target.checked ? 1 : 0 })} /> {i.label}</label>
+            : <label key={i.key} title={`(analog ${i.key})`}>{i.label} <input type="range" min={0} max={1} step={0.01} value={inVals[i.key] ?? 0}
+                onChange={(e) => setInVals({ ...inVals, [i.key]: +e.target.value })} /> <span className="num">{(inVals[i.key] ?? 0).toFixed(2)}</span></label>)}
+        </div>
+      )}
       <dl className="stats">
         <dt>frame</dt><dd>{stats.frame}</dd>
         <dt>time</dt><dd>{stats.time}</dd>

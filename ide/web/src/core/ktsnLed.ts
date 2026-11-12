@@ -57,7 +57,10 @@ export interface Core {
   checkUsing(src: string, sources: UseSources, context?: DslContext): CompileError | null;
   /** The connected board's GPIO outputs (io ...) is checked against: slot numbers with optional names; null = no
    *  board (any slot 0..7 and any name are accepted). */
-  setOutputs(outputs: { n: number; name: string }[] | null): void;
+  /** The connected board's GPIO slots (outputs and inputs, mode as the board names it), or null: no board, any name. */
+  setOutputs(outputs: { n: number; name: string; mode?: string }[] | null): void;
+  /** What an input reads in the preview, by slot number or name: a digital input true/false, an analog one 0..1. */
+  setInput(slot: number | string, value: boolean | number): void;
   /** Compile and run it from the next frame; on error the old program keeps running. */
   load(src: string): CompileError | null;
   /** Run once in a temporary channel, like a board's autoexec. Returns an error/fault message or "". */
@@ -100,6 +103,7 @@ export function loadCore(): Promise<Core> {
     const setLib = fn('lc_set_library', null, ['string']);
     let libNames: string[] | null = null;
     const setIo = fn('lc_set_io', null, ['string']);
+    const setIn = fn('lc_set_input', null, ['number', 'string', 'number']);
     const useClear = fn('lc_use_clear', null, []);
     const useAdd = fn('lc_use_add', null, ['string', 'string', 'string']);
     let uses: UseSources = new Map();
@@ -150,7 +154,11 @@ export function loadCore(): Promise<Core> {
         pushUses(uses);
         return e;
       },
-      setOutputs(o) { setIo(o === null ? '-' : o.map((x) => `${x.n}:${x.name}`).join('\n')); },
+      setOutputs(o) { setIo(o === null ? '-' : o.map((x) => `${x.n}:${x.name}${x.mode ? `:${x.mode}` : ''}`).join('\n')); },
+      setInput(slot, value) {
+        const v = typeof value === 'boolean' ? (value ? 1 : 0) : Math.round(Math.min(1, Math.max(0, value)) * 65536);
+        setIn(typeof slot === 'number' ? slot : -1, typeof slot === 'string' ? slot : '', v);
+      },
       load: (src) => parseError(load(src)),
       autoexec: (src) => autoexec(src),
       sunEvent(lat, lon, alt, rising, from, to) { const t = sunEvent(lat, lon, alt, rising ? 1 : 0, from, to) as number; return t < 0 ? null : t; },

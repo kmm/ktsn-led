@@ -39,12 +39,17 @@ static bool        wh_exists(const char *name)
     snprintf(key, sizeof key, "\n%s\n", name);
     return strstr(s_lib, key) != NULL;
 }
-/* GPIO outputs: the connected board's (lc_set_io), or, without a board, every slot 0..7 exists and any name is
- * accepted (as slot 0). Values are remembered so (io ...) reads back what (io-set ...) wrote. */
+/* GPIO slots: the connected board's (lc_set_io, with modes), or, without a board, every slot 0..7 exists and any
+ * name is accepted: each new name gets the next slot (so the preview can set inputs by name) and modes are unknown
+ * (the compiler then doesn't check in/analog/io kinds). Output values are remembered so (io ...) reads back what
+ * (io-set ...) wrote; input values come from the preview's controls (lc_set_input). */
 static bool     s_io_known;
 static bool     s_io_used[8];
 static char     s_io_name[8][16];
+static int8_t   s_io_mode[8];
 static uint16_t s_io_val[8];
+static uint32_t s_in_val[8];                       /* digital: 0/1, analog: 0..65536 */
+static char     s_off_name[8][16];                 /* offline: names in the order programs used them */
 static bool     io_name_ok(const char *s)
 {
     size_t n = strlen(s);
@@ -55,13 +60,21 @@ static bool     io_name_ok(const char *s)
 }
 static int         wh_io_find(const char *name)
 {
-    if (!s_io_known) return io_name_ok(name) ? 0 : -1;
+    if (!s_io_known) {
+        if (!io_name_ok(name)) return -1;
+        for (int i = 0; i < 8; i++) if (!strcmp(s_off_name[i], name)) return i;
+        for (int i = 0; i < 8; i++) if (!s_off_name[i][0]) { snprintf(s_off_name[i], sizeof s_off_name[i], "%s", name); return i; }
+        return 0;                                  /* more than 8 names: they share slot 0 */
+    }
     for (int i = 0; i < 8; i++) if (s_io_used[i] && s_io_name[i][0] && !strcmp(s_io_name[i], name)) return i;
     return -1;
 }
 static bool        wh_io_used(int n) { return n >= 0 && n < 8 && (!s_io_known || s_io_used[n]); }
 static uint16_t    wh_io_get(int n) { return s_io_val[n]; }
 static const char *wh_io_set(int n, uint16_t v) { s_io_val[n] = v; return NULL; }
+static int         wh_io_mode(int n) { return s_io_known && n >= 0 && n < 8 && s_io_used[n] ? s_io_mode[n] : -1; }
+static bool        wh_in_get(int n) { return n >= 0 && n < 8 && s_in_val[n] != 0; }
+static uint32_t    wh_analog_get(int n, int samples) { (void)samples; return n >= 0 && n < 8 ? s_in_val[n] : 0; }
 
 /* What (use name) sees: set by the IDE (the connected board's library, or the local one). src NULL: not usable, why says so. */
 typedef struct lib_src { struct lib_src *next; char *name, *src, *why; } lib_src_t;
@@ -73,7 +86,8 @@ static char *wh_lib_load(const char *name)
     return e && e->src ? strdup(e->src) : NULL;
 }
 static const char *wh_lib_why(const char *name) { const lib_src_t *e = lib_find(name); return e ? e->why : NULL; }
-static const dsl_host_t k_wasm_host = { wh_n, wh_get, wh_set, wh_play, wh_stop, wh_exists, wh_io_find, wh_io_used, wh_io_get, wh_io_set, wh_lib_load, wh_lib_why };
+static const dsl_host_t k_wasm_host = { wh_n, wh_get, wh_set, wh_play, wh_stop, wh_exists, wh_io_find, wh_io_used, wh_io_get, wh_io_set,
+                                        wh_lib_load, wh_lib_why, wh_io_mode, wh_in_get, wh_analog_get };
 
 /* (Re)create the simulated channel with npix pixels. Globals are created once and keep their contents. */
 EMSCRIPTEN_KEEPALIVE int lc_init(int npix)
@@ -118,11 +132,14 @@ EMSCRIPTEN_KEEPALIVE void lc_use_add(const char *name, const char *src, const ch
     s_srcs = e;
 }
 
-/* The connected board's outputs for (io ...) checks: "n:name" lines (name may be empty); "-" = no board (accept any). */
+/* The connected board's slots for (io/in/analog ...) checks: "n:name[:mode]" lines (name may be empty; mode binary,
+ * pwm, input or analog); "-" = no board (accept any name). */
 EMSCRIPTEN_KEEPALIVE void lc_set_io(const char *desc)
 {
+    static const char *const modes[] = { "binary", "pwm", "input", "analog" };
     memset(s_io_used, 0, sizeof s_io_used);
     memset(s_io_name, 0, sizeof s_io_name);
+    memset(s_io_mode, -1, sizeof s_io_mode);
     s_io_known = strcmp(desc, "-") != 0;
     if (!s_io_known) return;
     for (const char *p = desc; *p; ) {
@@ -130,11 +147,25 @@ EMSCRIPTEN_KEEPALIVE void lc_set_io(const char *desc)
         long n = strtol(p, &end, 10);
         if (end == p || *end != ':') break;
         p = end + 1;
-        size_t l = strcspn(p, "\n");
-        if (n >= 0 && n < 8) { s_io_used[n] = true; snprintf(s_io_name[n], sizeof s_io_name[n], "%.*s", (int)(l < 15 ? l : 15), p); }
+        size_t l = strcspn(p, "\n"), nl = strcspn(p, ":\n");
+        if (n >= 0 && n < 8) {
+            s_io_used[n] = true;
+            snprintf(s_io_name[n], sizeof s_io_name[n], "%.*s", (int)(nl < 15 ? nl : 15), p);
+            if (nl < l)
+                for (int m = 0; m < 4; m++)
+                    if (l - nl - 1 == strlen(modes[m]) && !strncmp(p + nl + 1, modes[m], l - nl - 1)) s_io_mode[n] = (int8_t)m;
+        }
         p += l;
         if (*p == '\n') p++;
     }
+}
+
+/* What an input reads in the preview: slot >= 0, or by name (slot -1; offline a new name gets its slot here).
+ * value: digital 0/1, analog 0..65536. */
+EMSCRIPTEN_KEEPALIVE void lc_set_input(int slot, const char *name, uint32_t value)
+{
+    if (slot < 0) slot = wh_io_find(name);
+    if (slot >= 0 && slot < 8) s_in_val[slot] = value > 65536 ? 65536 : value;
 }
 
 /* Compile only (no change to what runs). "" if fine, else "line L col C: message". */

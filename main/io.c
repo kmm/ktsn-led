@@ -3,9 +3,17 @@
 #include <string.h>
 #include "config.h"
 #include "settings.h"
+#include <stddef.h>
+#include "automation.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "esp_adc/adc_continuous.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+_Static_assert(offsetof(io_cfg_t, pull) == IO_CFG_V1_SIZE, "the fields before pull must keep the stored 0.19.0 layout");
 
 static const char *TAG = "io";
 #define DUTY_BITS LEDC_TIMER_10_BIT                    /* 1024 steps; fine up to ~40 kHz on an 80 MHz clock */
@@ -20,6 +28,43 @@ static bool     s_init;
 static uint16_t s_tfreq[SOC_LEDC_TIMER_NUM];           /* frequency of each timer, and how many outputs use it */
 static uint8_t  s_tref[SOC_LEDC_TIMER_NUM];
 static bool     s_chan_used[SOC_LEDC_CHANNEL_NUM];
+
+/* Inputs: the inputs task polls digital pins every ms (debounce) and owns the ADC (continuous DMA, ADC1 only), which
+ * it sets up again whenever s_adc_gen changes. Readers on other tasks only read these. */
+static volatile bool     s_in_val[IO_MAX];             /* debounced, after invert */
+static uint16_t          s_ring[IO_MAX][IO_SAMPLES_MAX];   /* analog readings 0..4095, one per ms */
+static volatile uint16_t s_ring_at[IO_MAX], s_ring_n[IO_MAX];
+static volatile uint32_t s_adc_gen;                    /* bumped by io_apply when the analog inputs change */
+static TaskHandle_t      s_task;
+#define READ_HZ    1000                                /* analog readings per second per input */
+#define ADC_MAX    4095                                /* 12-bit on both chips (SOC_ADC_DIGI_MAX_BITWIDTH) */
+
+static const char *const k_mode_names[IO_MODE_COUNT] = { "binary", "pwm", "input", "analog" };
+static const char *const k_pull_names[3] = { "none", "up", "down" };
+const char *io_mode_name(int m) { return m >= 0 && m < IO_MODE_COUNT ? k_mode_names[m] : "?"; }
+const char *io_pull_name(int p) { return p >= 0 && p < 3 ? k_pull_names[p] : "?"; }
+int io_mode_parse(const char *s) { for (int i = 0; i < IO_MODE_COUNT; i++) if (!strcmp(s, k_mode_names[i])) return i; return -1; }
+int io_pull_parse(const char *s) { for (int i = 0; i < 3; i++) if (!strcmp(s, k_pull_names[i])) return i; return -1; }
+
+const char *io_analog_pins(void)
+{
+#if CONFIG_IDF_TARGET_ESP32
+    return "32..39";
+#elif CONFIG_IDF_TARGET_ESP32C6
+    return "0..6";
+#else
+    return "an ADC1 pin of this chip";
+#endif
+}
+
+static bool adc1_channel(int gpio, adc_channel_t *ch)
+{
+    adc_unit_t unit;
+    adc_channel_t c;
+    if (adc_continuous_io_to_channel(gpio, &unit, &c) != ESP_OK || unit != ADC_UNIT_1) return false;
+    if (ch) *ch = c;
+    return true;
+}
 
 const char *io_check_name(const char *name)
 {
@@ -42,13 +87,24 @@ const char *io_check(const io_cfg_t *io, int *bad)
         const io_cfg_t *c = &io[i];
         *bad = i;
         if (c->gpio < 0) continue;
-        const char *why = settings_check_gpio(c->gpio);
+        if (c->mode >= IO_MODE_COUNT) return "mode is binary, pwm, input or analog";
+        const char *why = io_mode_is_output(c->mode) ? settings_check_gpio(c->gpio) : settings_check_gpio_in(c->gpio);
         if (why) return why;
         for (int ch = 0; ch < g_set.nch; ch++) if (g_set.ch[ch].gpio == c->gpio) return "that gpio drives an LED channel";
-        for (int j = 0; j < i; j++) if (io[j].gpio == c->gpio) return "that gpio is already an output";
+        for (int j = 0; j < i; j++) if (io[j].gpio == c->gpio) return "that gpio is already used by another slot";
         if ((why = io_check_name(c->name))) return why;
-        for (int j = 0; j < i; j++) if (c->name[0] && io[j].gpio >= 0 && !strcmp(io[j].name, c->name)) return "another output has that name";
-        if (c->mode > IO_PWM) return "mode is binary or pwm";
+        for (int j = 0; j < i; j++) if (c->name[0] && io[j].gpio >= 0 && !strcmp(io[j].name, c->name)) return "another slot has that name";
+        if (c->mode == IO_INPUT) {
+            if (c->pull > IO_PULL_DOWN) return "pull is up, down or none";
+            if (c->pull != IO_PULL_NONE && !GPIO_IS_VALID_OUTPUT_GPIO(c->gpio))   /* ESP32 34..39: input only, no pulls */
+                return "this pin has no pull resistors: use pull=none and an external resistor";
+            if (c->debounce > IO_DEBOUNCE_MAX) return "debounce must be 0..1000 ms";
+        }
+        if (c->mode == IO_ANALOG && !adc1_channel(c->gpio, NULL)) {
+            static char msg[64];                       /* io_check runs under cmd_lock */
+            snprintf(msg, sizeof msg, "analog inputs need an ADC1 pin (gpio %s)", io_analog_pins());
+            return msg;
+        }
         if (c->mode == IO_PWM) {
             if (c->freq < IO_FREQ_MIN || c->freq > IO_FREQ_MAX) return "pwm frequency must be 1..20000 Hz";
             if (++npwm > SOC_LEDC_CHANNEL_NUM) return "too many pwm outputs for this chip";
@@ -64,7 +120,7 @@ const char *io_check(const io_cfg_t *io, int *bad)
 static void drive(int n)
 {
     const io_cfg_t *c = &s_cfg[n];
-    if (!s_ok[n]) return;
+    if (!s_ok[n] || !io_mode_is_output(c->mode)) return;
     if (c->mode == IO_BINARY) gpio_set_level(c->gpio, (s_val[n] != 0) != (c->invert != 0));
     else {
         uint32_t duty = (uint32_t)s_val[n] * DUTY_FULL / 256u;
@@ -78,7 +134,8 @@ static void drive(int n)
 /* Same hardware setup (the name doesn't matter): such an output is left alone, so it doesn't glitch. */
 static bool same_hw(const io_cfg_t *a, const io_cfg_t *b)
 {
-    return a->gpio == b->gpio && a->mode == b->mode && a->invert == b->invert && (a->mode != IO_PWM || a->freq == b->freq);
+    return a->gpio == b->gpio && a->mode == b->mode && a->invert == b->invert && (a->mode != IO_PWM || a->freq == b->freq)
+        && (a->mode != IO_INPUT || (a->pull == b->pull && a->debounce == b->debounce && a->trigger == b->trigger));
 }
 
 static void release(int n)
@@ -97,6 +154,17 @@ static void release(int n)
 
 static bool setup(int n, const io_cfg_t *c)
 {
+    if (c->mode == IO_ANALOG) {                        /* the inputs task sets up the ADC (and the pin) */
+        s_ring_n[n] = s_ring_at[n] = 0;
+        return true;
+    }
+    if (c->mode == IO_INPUT) {
+        gpio_config_t g = { .pin_bit_mask = 1ULL << c->gpio, .mode = GPIO_MODE_INPUT,
+                            .pull_up_en = c->pull == IO_PULL_UP, .pull_down_en = c->pull == IO_PULL_DOWN };
+        if (gpio_config(&g) != ESP_OK) { ESP_LOGE(TAG, "input %d: gpio %d failed", n, c->gpio); return false; }
+        s_in_val[n] = (gpio_get_level(c->gpio) != 0) != (c->invert != 0);   /* the state at setup: no trigger for it */
+        return true;
+    }
     if (c->mode == IO_BINARY) {
         gpio_config_t g = { .pin_bit_mask = 1ULL << c->gpio, .mode = GPIO_MODE_OUTPUT };
         gpio_set_level(c->gpio, c->invert ? 1 : 0);    /* off before it becomes an output */
@@ -130,6 +198,108 @@ static bool setup(int n, const io_cfg_t *c)
     return true;
 }
 
+/* ---- the inputs task ---- */
+
+static adc_continuous_handle_t s_adc;
+static int8_t   s_adc_slot[SOC_ADC_MAX_CHANNEL_NUM];   /* ADC1 channel -> slot, -1 = none */
+static uint32_t s_acc[IO_MAX], s_acc_n[IO_MAX], s_decim;
+static uint8_t  s_conv[256];                          /* one DMA frame at most (ESP32 at 20 kHz: 200 bytes per 5 ms) */
+static adc_continuous_data_t s_parsed[sizeof s_conv / SOC_ADC_DIGI_RESULT_BYTES];
+
+static void adc_stop(void)
+{
+    if (!s_adc) return;
+    adc_continuous_stop(s_adc);
+    adc_continuous_deinit(s_adc);
+    s_adc = NULL;
+}
+
+/* (Re)start the ADC for the analog inputs configured now: every one gets READ_HZ readings, each the average of
+ * s_decim conversions (the chip's minimum rate is higher than we need on the ESP32). */
+static void adc_start(void)
+{
+    adc_stop();
+    adc_digi_pattern_config_t pat[SOC_ADC_PATT_LEN_MAX];
+    int np = 0;
+    for (int i = 0; i < SOC_ADC_MAX_CHANNEL_NUM; i++) s_adc_slot[i] = -1;
+    for (int i = 0; i < IO_MAX && np < SOC_ADC_PATT_LEN_MAX; i++) {
+        adc_channel_t ch;
+        if (s_cfg[i].gpio < 0 || s_cfg[i].mode != IO_ANALOG || !s_ok[i] || !adc1_channel(s_cfg[i].gpio, &ch)) continue;
+        pat[np++] = (adc_digi_pattern_config_t){ .atten = ADC_ATTEN_DB_12, .channel = ch, .unit = ADC_UNIT_1,
+                                                 .bit_width = SOC_ADC_DIGI_MAX_BITWIDTH };
+        s_adc_slot[ch] = (int8_t)i;
+        s_acc[i] = s_acc_n[i] = 0;
+    }
+    if (!np) return;
+    uint32_t total = READ_HZ * 2 * np;                 /* at least 2 conversions per reading */
+    if (total < SOC_ADC_SAMPLE_FREQ_THRES_LOW) total = SOC_ADC_SAMPLE_FREQ_THRES_LOW;
+    total = (total + np * READ_HZ - 1) / (np * READ_HZ) * (np * READ_HZ);    /* a whole number of conversions per reading */
+    s_decim = total / (np * READ_HZ);
+    uint32_t frame = total / 200 * SOC_ADC_DIGI_RESULT_BYTES;              /* ~5 ms of conversions */
+    frame = (frame + SOC_ADC_DIGI_DATA_BYTES_PER_CONV - 1) / SOC_ADC_DIGI_DATA_BYTES_PER_CONV * SOC_ADC_DIGI_DATA_BYTES_PER_CONV;
+    if (frame < SOC_ADC_DIGI_DATA_BYTES_PER_CONV * 4) frame = SOC_ADC_DIGI_DATA_BYTES_PER_CONV * 4;
+    if (frame > sizeof s_conv) frame = sizeof s_conv;
+    adc_continuous_handle_cfg_t hc = { .max_store_buf_size = frame * 4, .conv_frame_size = frame, .flags.flush_pool = 1 };
+    adc_continuous_config_t cc = { .pattern_num = (uint32_t)np, .adc_pattern = pat, .sample_freq_hz = total,
+                                   .conv_mode = ADC_CONV_SINGLE_UNIT_1 };
+    esp_err_t e = adc_continuous_new_handle(&hc, &s_adc);
+    if (e == ESP_OK) e = adc_continuous_config(s_adc, &cc);
+    if (e == ESP_OK) e = adc_continuous_start(s_adc);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "analog inputs: adc failed (%s)", esp_err_to_name(e));
+        if (s_adc) { adc_continuous_deinit(s_adc); s_adc = NULL; }
+        return;
+    }
+    ESP_LOGI(TAG, "analog inputs: %d on the adc at %lu Hz, %lu conversions per reading", np, (unsigned long)total,
+             (unsigned long)s_decim);
+}
+
+static void adc_poll(void)
+{
+    uint32_t len = 0;
+    while (s_adc && adc_continuous_read(s_adc, s_conv, sizeof s_conv, &len, 0) == ESP_OK && len) {
+        uint32_t n = 0;
+        if (adc_continuous_parse_data(s_adc, s_conv, len, s_parsed, &n) != ESP_OK) break;
+        for (uint32_t k = 0; k < n; k++) {
+            const adc_continuous_data_t *d = &s_parsed[k];
+            if (!d->valid || d->unit != ADC_UNIT_1 || d->channel >= SOC_ADC_MAX_CHANNEL_NUM) continue;
+            int i = s_adc_slot[d->channel];
+            if (i < 0) continue;
+            s_acc[i] += d->raw_data > ADC_MAX ? ADC_MAX : d->raw_data;
+            if (++s_acc_n[i] < s_decim) continue;
+            uint16_t at = s_ring_at[i];
+            s_ring[i][at] = (uint16_t)((s_acc[i] + s_decim / 2) / s_decim);
+            s_ring_at[i] = (uint16_t)((at + 1) % IO_SAMPLES_MAX);
+            if (s_ring_n[i] < IO_SAMPLES_MAX) s_ring_n[i]++;
+            s_acc[i] = s_acc_n[i] = 0;
+        }
+    }
+}
+
+static void inputs_task(void *arg)
+{
+    (void)arg;
+    uint32_t gen = 0;
+    uint16_t stable_ms[IO_MAX] = { 0 };
+    for (;;) {
+        if (gen != s_adc_gen) { gen = s_adc_gen; adc_start(); }
+        adc_poll();
+        bool kick = false;
+        for (int i = 0; i < IO_MAX; i++) {             /* debounce: a new level must hold `debounce` ms */
+            const io_cfg_t *c = &s_cfg[i];
+            if (c->gpio < 0 || c->mode != IO_INPUT || !s_ok[i]) { stable_ms[i] = 0; continue; }
+            bool v = (gpio_get_level(c->gpio) != 0) != (c->invert != 0);
+            if (v == s_in_val[i]) { stable_ms[i] = 0; continue; }
+            if (++stable_ms[i] < c->debounce) continue;
+            s_in_val[i] = v;
+            stable_ms[i] = 0;
+            if (c->trigger) kick = true;
+        }
+        if (kick) automation_run_now();
+        vTaskDelay(1);                                 /* 1 ms (CONFIG_FREERTOS_HZ 1000) */
+    }
+}
+
 void io_apply(void)
 {
     if (!s_init) {
@@ -149,9 +319,23 @@ void io_apply(void)
         s_cfg[i] = *c;
         s_ok[i] = setup(i, c);
         if (!s_ok[i]) continue;
-        ESP_LOGI(TAG, "output %d%s%s: gpio %d %s%s, off", i, c->name[0] ? " " : "", c->name, c->gpio,
-                 c->mode == IO_PWM ? "pwm" : "binary", c->invert ? " inverted" : "");
+        if (io_mode_is_output(c->mode))
+            ESP_LOGI(TAG, "output %d%s%s: gpio %d %s%s, off", i, c->name[0] ? " " : "", c->name, c->gpio,
+                     io_mode_name(c->mode), c->invert ? " inverted" : "");
+        else ESP_LOGI(TAG, "input %d%s%s: gpio %d %s%s", i, c->name[0] ? " " : "", c->name, c->gpio,
+                      io_mode_name(c->mode), c->invert ? " inverted" : "");
     }
+    /* the analog set (slot + pin) decides the ADC setup: tell the inputs task when it changed */
+    static uint64_t s_analog_sig;
+    uint64_t sig = 0;
+    bool any_in = false;
+    for (int i = 0; i < IO_MAX; i++) {
+        if (s_cfg[i].gpio < 0 || !s_ok[i] || io_mode_is_output(s_cfg[i].mode)) continue;
+        any_in = true;
+        if (s_cfg[i].mode == IO_ANALOG) sig |= (uint64_t)(s_cfg[i].gpio + 1) << (i * 8);
+    }
+    if (sig != s_analog_sig) { s_analog_sig = sig; s_adc_gen++; }
+    if (any_in && !s_task) xTaskCreate(inputs_task, "inputs", 3072, NULL, tskIDLE_PRIORITY + 3, &s_task);
 }
 
 int io_on_gpio(int gpio)
@@ -167,10 +351,30 @@ int io_find(const char *name)
 }
 
 bool io_used(int n) { return n >= 0 && n < IO_MAX && g_set.io[n].gpio >= 0; }
+int io_mode(int n) { return io_used(n) ? g_set.io[n].mode : -1; }
+
+bool io_in_get(int n)
+{
+    return n >= 0 && n < IO_MAX && s_ok[n] && s_cfg[n].gpio >= 0 && s_cfg[n].mode == IO_INPUT && s_in_val[n];
+}
+
+uint32_t io_analog_get(int n, int samples)
+{
+    if (n < 0 || n >= IO_MAX || !s_ok[n] || s_cfg[n].gpio < 0 || s_cfg[n].mode != IO_ANALOG) return 0;
+    int have = s_ring_n[n], at = s_ring_at[n];
+    if (samples < 1) samples = 1;
+    if (samples > have) samples = have;
+    if (!samples) return 0;
+    uint32_t sum = 0;
+    for (int k = 1; k <= samples; k++) sum += s_ring[n][(at - k + IO_SAMPLES_MAX) % IO_SAMPLES_MAX];
+    uint32_t v = (uint32_t)(((uint64_t)sum * IO_ANALOG_FULL + (uint64_t)samples * ADC_MAX / 2) / ((uint64_t)samples * ADC_MAX));
+    return s_cfg[n].invert ? IO_ANALOG_FULL - v : v;
+}
 
 const char *io_set(int n, uint16_t v)
 {
     if (!io_used(n)) return "no such output";
+    if (!io_mode_is_output(g_set.io[n].mode)) return "that is an input";
     if (!s_ok[n]) return "output isn't working (see the log)";
     if (v > 256) v = 256;
     s_val[n] = g_set.io[n].mode == IO_BINARY ? (v ? 256 : 0) : v;
@@ -178,5 +382,11 @@ const char *io_set(int n, uint16_t v)
     return NULL;
 }
 
-uint16_t io_get(int n) { return n >= 0 && n < IO_MAX && s_ok[n] ? s_val[n] : 0; }
+uint16_t io_get(int n)
+{
+    if (n < 0 || n >= IO_MAX || !s_ok[n] || s_cfg[n].gpio < 0) return 0;
+    if (s_cfg[n].mode == IO_INPUT) return io_in_get(n) ? 256 : 0;
+    if (s_cfg[n].mode == IO_ANALOG) return (uint16_t)((io_analog_get(n, 16) * 256u + IO_ANALOG_FULL / 2) / IO_ANALOG_FULL);
+    return s_val[n];
+}
 bool io_working(int n) { return n >= 0 && n < IO_MAX && s_ok[n]; }

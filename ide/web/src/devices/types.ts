@@ -23,13 +23,19 @@ export interface BoardStatus {
   time: string; tz: string; hostname: string;
   wifi: { ssid: string; connected: boolean; ip: string; rssi: number } | null;     // null on WiFi-less builds
   ntp?: { server: string; synced: boolean; last_sync: string | null };
-  /** GPIO outputs now (configured ones): value 0..1 (binary: 0 or 1), ok = set up without errors. */
-  io?: { n: number; name: string; value: number; ok: boolean }[];
+  /** GPIO slots now (configured ones): value 0..1 (binary and digital inputs: 0 or 1; analog: the latest 16 ms
+   *  averaged), ok = set up without errors; mode missing on firmware from before inputs. */
+  io?: { n: number; name: string; mode?: BoardIo['mode']; value: number; ok: boolean }[];
   heap_free: number;
 }
 
-/** A GPIO output (relay, PWM). Always off at boot; configuration applies at once, `save` keeps it. */
-export interface BoardIo { n: number; gpio: number; mode: 'binary' | 'pwm'; freq: number; invert: boolean; name: string }
+/** A GPIO slot: an output (relay, PWM; always off at boot) or an input (digital, analog). Configuration applies at
+ *  once, `save` keeps it. pull/debounce/trigger: digital inputs; missing on firmware from before inputs. */
+export interface BoardIo {
+  n: number; gpio: number; mode: 'binary' | 'pwm' | 'input' | 'analog'; freq: number; invert: boolean; name: string;
+  pull?: 'up' | 'down' | 'none'; debounce?: number; trigger?: boolean;
+}
+export const isOutputMode = (m: BoardIo['mode']) => m === 'binary' || m === 'pwm';
 
 /** `wire`: bytes per pixel on the wire ("RGB", "GRB", "GRBW", "BRG WWW"; layout, applies after save + reboot);
  *  `gamma`: 1.0..3.0, 1 = off; `dither`: bits 0..4, 0 = off; `wmax`: white limit, percent (W spread over several W

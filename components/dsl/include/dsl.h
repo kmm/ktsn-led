@@ -146,7 +146,16 @@ typedef struct {
      * programs can't use libraries. lib_why, optional: why a name isn't available (NULL: the usual message). */
     char       *(*lib_load)(const char *name);
     const char *(*lib_why)(const char *name);
+    /* GPIO inputs (in / analog; channel programs too, so these must be cheap and safe from the render task).
+     * io_mode: DSL_IO_* of a configured slot, -1 = not configured or unknown (then the compiler doesn't check the
+     * kind). in_get: a digital input, debounced. analog_get: the average of the latest `samples` readings, 0..65536. */
+    int         (*io_mode)(int n);
+    bool        (*in_get)(int n);
+    uint32_t    (*analog_get)(int n, int samples);
 } dsl_host_t;
+enum { DSL_IO_BINARY = 0, DSL_IO_PWM, DSL_IO_INPUT, DSL_IO_ANALOG };
+#define DSL_ANALOG_SAMPLES_DEFAULT 16
+#define DSL_ANALOG_SAMPLES_MAX     256
 void dsl_set_host(const dsl_host_t *h);
 
 typedef struct channel {

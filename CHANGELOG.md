@@ -3,6 +3,20 @@
 One version (`version.txt`) covers the firmware, the DSL, the console and HTTP API, and the IDE. Rules for bumping it
 are in CLAUDE.md ("Versioning"). Newest first; versions before 0.10.0 were not recorded here.
 
+## 0.20.0 (2026-11-12)
+- New: GPIO inputs. `io config <n> <gpio> input` sets up a digital input (pull up by default, or `pull=down|none`;
+  `debounce=<ms>`, default 20; `invert`; `name=`), `io config <n> <gpio> analog` an analog one (ADC1 pins only:
+  ESP32 GPIO 32..39, C6 GPIO 0..6). They share the 8 slots and names with the outputs.
+- New: `(in button)` -> t / nil and `(analog knob [samples])` -> 0..1 (the latest 1..256 readings averaged, one per
+  ms, default 16). Unlike the outputs they work in channel programs too, not only in automation.
+- New: an input marked `trigger` runs the automation program right after it changes (a button can switch programs at
+  once).
+- `io` lists input states and analog values; the API config and patch take the new modes and `pull`, `debounce`,
+  `trigger`; status shows each slot's mode. `io-set` and `io` refuse inputs.
+- IDE: the Board panel's Outputs became "Inputs and outputs"; the preview has Inputs controls (a checkbox per digital
+  input, a slider per analog one) for the board's inputs, or offline for the names the program reads; reference
+  category Inputs. Outputs saved by 0.19.0 and older load unchanged.
+
 ## 0.19.0 (2026-11-12)
 - New: date and time comparisons for scheduling. `(time-gt t)`, `time-ge`, `time-lt`, `time-le`, `time-eq` compare the
   time of day with `"HH:MM"`, `"HH:MM:SS"` or a number of minutes after midnight (so `(env sunset)` fits), at the

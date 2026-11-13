@@ -670,9 +670,10 @@ Host tests: 4483 checks, 0 failures (macOS clang and gcc). **Builds cleanly with
   Not run on hardware: the API `loc` field (`tools/apitest.py` check only syntax-checked).
 - GPIO inputs (0.20.0, 2026-11-12): host-tested (`t_inputs`: names, kinds, samples, clamping, mode changed after
   compiling, hosts without modes, automation reading inputs), IDE tests (core: offline names, board kinds; preview
-  input discovery), builds for every variant (ESP32 2 MB WiFi image 27% free after the ADC driver). **Not run on
-  hardware**: digital input + debounce + trigger, analog readings on both chips (ADC continuous mode, the ESP32's
-  20 kHz minimum), the stored `io` blob from 0.19.0 loading after the upgrade.
+  input discovery), builds for every variant (ESP32 2 MB WiFi image 27% free after the ADC driver). **Verified by the
+  user on the C6** (2026-11-12): `in` and `analog` read digital and analog inputs. Not separately reported: debounce,
+  `trigger`, the stored `io` blob from 0.19.0 loading after the upgrade. Not run on an ESP32 (ADC continuous mode at
+  its 20 kHz minimum).
 - Date/time comparisons (0.19.0, 2026-11-12, `natives.c` "date and time comparisons", `bind_time_cmp`): host-tested
   (`t_time_cmp`: precision, numbers incl. sunset -1 and 24 h wrap, time-in/date-in wrapping, leap days, run-time
   strings as faults, nil without a clock, compile errors), reference entries (category Time) whose examples compile

@@ -794,8 +794,9 @@ Still unverified on hardware:
 2. `led_model` is `LED_MODEL_WS2812` (800 kHz). led_strip 3.x also has `LED_MODEL_WS2811`; try it if the string misbehaves.
 
 ## Next steps (planned)
-- Time comparisons, inputs, audio (plan agreed with the user 2026-11-12; **don't push to GitHub or run CI until all
-  three phases are done and tested by the user**). One handover + bump per phase:
+- Time comparisons, inputs, audio (plan agreed with the user 2026-11-12; pushed with CI on the user's word 2026-11-12,
+  with audio untested on a microphone: **still to do when the user's mic arrives**: tune AUDIO_GATE and beat detection
+  on real music). One handover + bump per phase:
   - Phase 1, 0.19.0 (done 2026-11-12, see Status): `time-gt/ge/lt/le/eq <t>`, `(time-in <from> <to>)` (wraps midnight, end exclusive);
     `date-gt/ge/lt/le/eq <d>`, `(date-in <from> <to>)` (wraps the year end, end inclusive). Times: a `"HH:MM[:SS]"`
     literal (checked at compile time) or a number = minutes after midnight (decimal for seconds; negative, e.g.

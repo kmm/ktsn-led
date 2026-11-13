@@ -8,14 +8,14 @@ jobs:
     name: Host tests (DSL core)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: make -C host
 
   ide:
     name: IDE (WASM core, tests, typecheck, build)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # The same image ide/run.sh builds: emsdk -> WASM core, npm ci, vitest, tsc + vite build.
       - run: docker build -f ide/Dockerfile .
 
@@ -28,7 +28,7 @@ jobs:
       matrix:
         variant: [esp32-2mb, esp32-2mb-nowifi, esp32-4mb, esp32c6, esp32c6-parlio, esp32c6-nowifi]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build
         shell: bash
         run: |

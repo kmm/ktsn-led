@@ -16,7 +16,7 @@
 #define GLOBAL_BUF_PIXELS 256
 #define CHANNEL_SCRATCH   2048
 
-static env_t     s_env = { .intensity = UNIT_ONE };
+static env_t     s_env = { .intensity = UNIT_ONE, .beatms = -1 };
 static globals_t s_globals;
 static channel_t s_ch;
 static bool      s_ready;
@@ -133,10 +133,10 @@ EMSCRIPTEN_KEEPALIVE void lc_use_add(const char *name, const char *src, const ch
 }
 
 /* The connected board's slots for (io/in/analog ...) checks: "n:name[:mode]" lines (name may be empty; mode binary,
- * pwm, input or analog); "-" = no board (accept any name). */
+ * pwm, input, analog or audio); "-" = no board (accept any name). */
 EMSCRIPTEN_KEEPALIVE void lc_set_io(const char *desc)
 {
-    static const char *const modes[] = { "binary", "pwm", "input", "analog" };
+    static const char *const modes[] = { "binary", "pwm", "input", "analog", "audio" };
     memset(s_io_used, 0, sizeof s_io_used);
     memset(s_io_name, 0, sizeof s_io_name);
     memset(s_io_mode, -1, sizeof s_io_mode);
@@ -152,7 +152,7 @@ EMSCRIPTEN_KEEPALIVE void lc_set_io(const char *desc)
             s_io_used[n] = true;
             snprintf(s_io_name[n], sizeof s_io_name[n], "%.*s", (int)(nl < 15 ? nl : 15), p);
             if (nl < l)
-                for (int m = 0; m < 4; m++)
+                for (int m = 0; m < 5; m++)
                     if (l - nl - 1 == strlen(modes[m]) && !strncmp(p + nl + 1, modes[m], l - nl - 1)) s_io_mode[n] = (int8_t)m;
         }
         p += l;

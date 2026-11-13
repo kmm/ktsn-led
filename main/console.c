@@ -161,6 +161,12 @@ static int set_time(cmd_out_t *o, const char *date, const char *clock)
     return 0;
 }
 
+static void print_unit(cmd_out_t *o, uint32_t v, uint32_t full)
+{
+    unsigned p = (unsigned)((v * 100ull + full / 2) / full);
+    out_printf(o, "%u.%02u", p / 100, p % 100);
+}
+
 static int cmd_env(cmd_out_t *o, int argc, char **argv)
 {
     if (argc == 3 && !strcmp(argv[1], "intensity")) {
@@ -177,6 +183,10 @@ static int cmd_env(cmd_out_t *o, int argc, char **argv)
                (unsigned long)(g_env.hour * 3600u + g_env.minute * 60u + g_env.second), g_env.timeset);
     out_printf(o, "sunrise=%d sunset=%d dawn=%d dusk=%d daylight=%d moon=%d moonlit=%d\n", g_env.sunrise, g_env.sunset, g_env.dawn,
                g_env.dusk, g_env.daylight, g_env.moon, g_env.moonlit);
+    out_printf(o, "band0..7=");
+    for (int b = 0; b < DSL_AUDIO_BANDS; b++) { print_unit(o, g_env.band[b], AUDIO_ONE); out_printf(o, b < DSL_AUDIO_BANDS - 1 ? "," : ""); }
+    out_printf(o, " level="); print_unit(o, g_env.level, AUDIO_ONE);
+    out_printf(o, " beats=%lu beatms=%ld\n", (unsigned long)g_env.beats, (long)g_env.beatms);
     return 0;
 }
 
@@ -624,11 +634,6 @@ static int io_arg(cmd_out_t *o, const char *s)
     return k;
 }
 
-static void print_unit(cmd_out_t *o, uint32_t v, uint32_t full)
-{
-    unsigned p = (unsigned)((v * 100ull + full / 2) / full);
-    out_printf(o, "%u.%02u", p / 100, p % 100);
-}
 
 /* io | io <n|name> <on|off|0..1> | io config <n> <gpio> <mode> [options] | io config <n> off
  * GPIO slots: outputs (binary relays, pwm) and inputs (digital, analog). Output values apply at once and aren't saved
@@ -654,10 +659,10 @@ static int cmd_io(cmd_out_t *o, int argc, char **argv)
             default:        out_printf(o, ": "); print_unit(o, io_get(i), 256); out_printf(o, "\n"); break;
             }
         }
-        if (!shown) out_puts(o, "nothing configured (io config <n> <gpio> <binary|pwm|input|analog>)");
+        if (!shown) out_puts(o, "nothing configured (io config <n> <gpio> <binary|pwm|input|analog|audio>)");
         return 0;
     }
-    const char *usage = "usage: io | io <n|name> <on|off|0..1> | io config <n> <gpio> <binary|pwm|input|analog> [freq=<Hz>] "
+    const char *usage = "usage: io | io <n|name> <on|off|0..1> | io config <n> <gpio> <binary|pwm|input|analog|audio> [freq=<Hz>] "
                         "[invert] [name=<name>] [pull=up|down|none] [debounce=<ms>] [trigger] | io config <n> off";
     if (!strcmp(argv[1], "config")) {
         if (argc < 4) { out_puts(o, usage); return 1; }
@@ -819,6 +824,57 @@ static void print_hhmm(cmd_out_t *o, const char *name, int m)
 }
 
 /* loc | loc <lat> <lon> | loc off: where the board is, for env sunrise, sunset, dawn, dusk */
+/* audio: the audio input's analysis (for setting up a microphone, and to measure what the analysis costs). */
+static void audio_line(cmd_out_t *o, const io_audio_stat_t *st, uint32_t *last_beats)
+{
+    char bands[AUDIO_BANDS * 2 + 1];
+    for (int b = 0; b < AUDIO_BANDS; b++) {
+        uint32_t v = (st->a.band[b] * 9u + AUDIO_ONE / 2) / AUDIO_ONE;
+        bands[b * 2] = (char)('0' + (v > 9 ? 9 : v));
+        bands[b * 2 + 1] = ' ';
+    }
+    bands[AUDIO_BANDS * 2 - 1] = 0;
+    int32_t ago = io_audio_beatms();
+    out_printf(o, "bands %s  level %lu%%  beats %lu%s", bands, (unsigned long)((st->a.level * 100u + AUDIO_ONE / 2) / AUDIO_ONE),
+               (unsigned long)st->a.beats, last_beats && st->a.beats != *last_beats ? " *" : "  ");
+    if (ago >= 0) out_printf(o, " (%ld ms ago)", (long)ago);
+    out_printf(o, "  swing %u\n", st->a.swing);
+    if (last_beats) *last_beats = st->a.beats;
+}
+
+static int cmd_audio(cmd_out_t *o, int argc, char **argv)
+{
+    io_audio_stat_t st;
+    io_audio_stat(&st);
+    if (st.slot < 0) { out_puts(o, "no audio input (io config <n> <gpio> audio [name=x])"); return 1; }
+    if (argc >= 2 && !strcmp(argv[1], "reset")) { io_audio_stat_reset(); out_puts(o, "timing and drop counts reset"); return 0; }
+    if (argc >= 2 && !strcmp(argv[1], "watch")) {
+        long secs = argc >= 3 ? strtol(argv[2], NULL, 10) : 10;
+        if (secs < 1 || secs > 600) { out_puts(o, "usage: audio watch [1..600 s]"); return 1; }
+        uint32_t last = st.a.beats;
+        cmd_unlock();                                  /* don't hold up the API and automation while watching */
+        for (long k = 0; k < secs * 4; k++) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+            io_audio_stat(&st);
+            if (st.slot < 0) break;
+            audio_line(o, &st, &last);
+        }
+        cmd_lock();
+        return 0;
+    }
+    if (argc >= 2) { out_puts(o, "usage: audio [watch [s] | reset]"); return 1; }
+    const io_cfg_t *c = &g_set.io[st.slot];
+    out_printf(o, "audio input %d%s%s on gpio %d: %d Hz, each sample the average of %lu conversions (adc %lu Hz in all)\n",
+               st.slot, c->name[0] ? " " : "", c->name, c->gpio, AUDIO_RATE, (unsigned long)st.per_sample, (unsigned long)st.adc_hz);
+    out_printf(o, "analysis: %lu blocks of %d ms, %lu us average, %lu us at most (%lu.%02lu%% of the time); %lu adc overflows\n",
+               (unsigned long)st.blocks, AUDIO_HOP_MS, (unsigned long)st.us_avg, (unsigned long)st.us_max,
+               (unsigned long)(st.us_avg / (AUDIO_HOP_MS * 10)), (unsigned long)(st.us_avg * 10 / AUDIO_HOP_MS % 100),
+               (unsigned long)st.dropped);
+    audio_line(o, &st, NULL);
+    out_puts(o, "(bands 0..9 low to high; swing = largest step from the middle in ADC counts (of 4095): aim for a few hundred, below 2000)");
+    return 0;
+}
+
 static int cmd_loc(cmd_out_t *o, int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "off")) g_set.has_loc = false;
@@ -911,7 +967,7 @@ const cmd_def_t g_cmds[] = {
     { "intensity", "Intensity: intensity | intensity <ch|all> <0..1> [fade seconds]  (all = global; applies at once)", cmd_intensity },
     { "lib",      "Program library: lib | lib show|rm <name> | lib set <name> [source] | lib save|run <name> <ch>", cmd_lib },
     { "white",    "White (W): white | white <ch> max <0..100> | mode <direct|extract|boost> | point <#RRGGBB> [ratio]  (at once)", cmd_white },
-    { "io",       "GPIO outputs and inputs: io | io <n|name> <on|off|0..1> | io config <n> <gpio> <binary|pwm|input|analog> [freq=Hz] [invert] [name=x] [pull=up|down|none] [debounce=ms] [trigger] | io config <n> off", cmd_io },
+    { "io",       "GPIO outputs and inputs: io | io <n|name> <on|off|0..1> | io config <n> <gpio> <binary|pwm|input|analog|audio> [freq=Hz] [invert] [name=x] [pull=up|down|none] [debounce=ms] [trigger] | io config <n> off", cmd_io },
     { "output",   "Output stage: output | output refresh <1..4> (sends per frame) | output parallel <on|off>  (at once)", cmd_output },
 #if CONFIG_KTSN_WIFI
     { "wifi",     "WiFi: wifi | wifi <ssid> [password] | wifi off", cmd_wifi },
@@ -920,6 +976,7 @@ const cmd_def_t g_cmds[] = {
     { "hostname", "Network name (DHCP, <name>.local): hostname | hostname <name>", cmd_hostname },
 #endif
     { "tz",       "Time zone: tz | tz <POSIX TZ>, e.g. tz PST8PDT,M3.2.0,M11.1.0", cmd_tz },
+    { "audio",    "Audio input analysis: audio | audio watch [s] | audio reset  (bands, level, beats, time per block)", cmd_audio },
     { "loc",      "Location for sunrise and sunset: loc | loc <lat> <lon> | loc off  (degrees, north and east positive)", cmd_loc },
     { "save",     "Save programs, autoexec, automation, channels, outputs, gamma, dither, white, output, intensity, tz, loc (and wifi, ntp, token, hostname) to flash", cmd_save },
     { "config",   "Show what is saved in flash, or: config erase", cmd_config },

@@ -641,10 +641,11 @@ export const ENTRIES: Entry[] = [
 
   /* ---------------- Environment ---------------- */
   {
-    name: 'env', category: 'Environment', summary: 'Frame counter, local time and date, the global intensity, the channel length, or the sun and moon.',
+    name: 'env', category: 'Environment', summary: 'Frame counter, local time and date, the global intensity, the channel length, the sun and moon, or the sound.',
     args: [{ name: 'name', type: 'name', desc: 'frame, hour, minute, second, ms, year, month, day, doy, weekday, daymin, daysec, ' +
-      'dayfrac, hourfrac, minfrac, timeset, intensity, npix, sunrise, sunset, dawn, dusk, daylight, moon or moonlit' }],
-    returns: 'int (a decimal for dayfrac, hourfrac and minfrac)',
+      'dayfrac, hourfrac, minfrac, timeset, intensity, npix, sunrise, sunset, dawn, dusk, daylight, moon, moonlit, ' +
+      'band0 .. band7, level, beats or beatms' }],
+    returns: 'int (a decimal for dayfrac, hourfrac, minfrac, band0 .. band7 and level)',
     details: 'frame counts frames (60 a second). hour 0..23, minute and second 0..59, ms 0..999 within the second, year, ' +
       'month 1..12, day 1..31, doy (day of the year) 1..366, weekday 0..6 (0 Sunday), intensity 0..256, npix the number of ' +
       'pixels of the channel the program runs on (so one program fits strings of any length; in the preview: its pixel ' +
@@ -661,7 +662,13 @@ export const ENTRIES: Entry[] = [
       'is 1 while the sun is up (above the sunrise altitude, checked every second, also through a midnight sun), 0 ' +
       'when it is down, -1 with no location or clock. moon is the phase angle 0..359 (0 new, 90 first quarter, 180 ' +
       'full, 270 last quarter; it can go straight into sin) and moonlit the percent of the disc lit; they need only ' +
-      'the clock, and are -1 until it is set.',
+      'the clock, and are -1 until it is set.\n\nSound, from an audio input (io config <n> <gpio> audio: an analog ' +
+      'microphone module on an ADC1 pin): band0 .. band7 are decimals 0..1, how loud the sound is from the lowest band ' +
+      '(31-62 Hz, the kick drum) to the highest (1.7-4 kHz), each about an octave; level is the overall loudness 0..1. ' +
+      'Both follow the volume by themselves (an automatic gain), are updated every 32 ms and fall back within about ' +
+      '0.2 s. beats counts the beats heard (sudden bass), beatms is the ms since the latest one (-1 before the first, ' +
+      'or with no audio input): (lt (env beatms) 100) is true for a moment on every beat. All are 0 (beatms -1) ' +
+      'without an audio input; the console command audio shows them on a board.',
     example: '(fill (buf O) #000000)\n(fill (buf O) #FF0000 0 (env second))    ; a bar growing every second\n\n' +
       '; a dot going round the string once a minute\n(set (buf O) (floor (* (env minfrac) (env npix))) #0000FF)\n\n' +
       '; lit while the sun is down, on weekdays\n(if (and (eq (env daylight) 0) (gt (env weekday) 0) (lt (env weekday) 6))\n  (fill (buf O) #402000))',

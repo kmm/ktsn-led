@@ -5,6 +5,7 @@
 #include "settings.h"
 #include <stddef.h>
 #include "automation.h"
+#include "app.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "esp_adc/adc_continuous.h"
@@ -39,7 +40,7 @@ static TaskHandle_t      s_task;
 #define READ_HZ    1000                                /* analog readings per second per input */
 #define ADC_MAX    4095                                /* 12-bit on both chips (SOC_ADC_DIGI_MAX_BITWIDTH) */
 
-static const char *const k_mode_names[IO_MODE_COUNT] = { "binary", "pwm", "input", "analog" };
+static const char *const k_mode_names[IO_MODE_COUNT] = { "binary", "pwm", "input", "analog", "audio" };
 static const char *const k_pull_names[3] = { "none", "up", "down" };
 const char *io_mode_name(int m) { return m >= 0 && m < IO_MODE_COUNT ? k_mode_names[m] : "?"; }
 const char *io_pull_name(int p) { return p >= 0 && p < 3 ? k_pull_names[p] : "?"; }
@@ -82,12 +83,12 @@ const char *io_check_name(const char *name)
 const char *io_check(const io_cfg_t *io, int *bad)
 {
     uint16_t freqs[SOC_LEDC_TIMER_NUM];
-    int nfreq = 0, npwm = 0;
+    int nfreq = 0, npwm = 0, naudio = 0;
     for (int i = 0; i < IO_MAX; i++) {
         const io_cfg_t *c = &io[i];
         *bad = i;
         if (c->gpio < 0) continue;
-        if (c->mode >= IO_MODE_COUNT) return "mode is binary, pwm, input or analog";
+        if (c->mode >= IO_MODE_COUNT) return "mode is binary, pwm, input, analog or audio";
         const char *why = io_mode_is_output(c->mode) ? settings_check_gpio(c->gpio) : settings_check_gpio_in(c->gpio);
         if (why) return why;
         for (int ch = 0; ch < g_set.nch; ch++) if (g_set.ch[ch].gpio == c->gpio) return "that gpio drives an LED channel";
@@ -100,11 +101,12 @@ const char *io_check(const io_cfg_t *io, int *bad)
                 return "this pin has no pull resistors: use pull=none and an external resistor";
             if (c->debounce > IO_DEBOUNCE_MAX) return "debounce must be 0..1000 ms";
         }
-        if (c->mode == IO_ANALOG && !adc1_channel(c->gpio, NULL)) {
+        if (io_mode_is_adc(c->mode) && !adc1_channel(c->gpio, NULL)) {
             static char msg[64];                       /* io_check runs under cmd_lock */
-            snprintf(msg, sizeof msg, "analog inputs need an ADC1 pin (gpio %s)", io_analog_pins());
+            snprintf(msg, sizeof msg, "%s inputs need an ADC1 pin (gpio %s)", c->mode == IO_AUDIO ? "audio" : "analog", io_analog_pins());
             return msg;
         }
+        if (c->mode == IO_AUDIO && ++naudio > 1) return "only one audio input";
         if (c->mode == IO_PWM) {
             if (c->freq < IO_FREQ_MIN || c->freq > IO_FREQ_MAX) return "pwm frequency must be 1..20000 Hz";
             if (++npwm > SOC_LEDC_CHANNEL_NUM) return "too many pwm outputs for this chip";
@@ -154,7 +156,7 @@ static void release(int n)
 
 static bool setup(int n, const io_cfg_t *c)
 {
-    if (c->mode == IO_ANALOG) {                        /* the inputs task sets up the ADC (and the pin) */
+    if (io_mode_is_adc(c->mode)) {                     /* the inputs task sets up the ADC (and the pin) */
         s_ring_n[n] = s_ring_at[n] = 0;
         return true;
     }
@@ -203,8 +205,32 @@ static bool setup(int n, const io_cfg_t *c)
 static adc_continuous_handle_t s_adc;
 static int8_t   s_adc_slot[SOC_ADC_MAX_CHANNEL_NUM];   /* ADC1 channel -> slot, -1 = none */
 static uint32_t s_acc[IO_MAX], s_acc_n[IO_MAX], s_decim;
-static uint8_t  s_conv[256];                          /* one DMA frame at most (ESP32 at 20 kHz: 200 bytes per 5 ms) */
+static uint8_t  s_conv[512];                          /* one DMA frame at most (~5 ms of conversions, capped) */
 static adc_continuous_data_t s_parsed[sizeof s_conv / SOC_ADC_DIGI_RESULT_BYTES];
+
+/* the audio input (written by the inputs task) */
+static int               s_audio_slot = -1;
+static audio_t           s_audio;
+static uint16_t          s_abuf[AUDIO_N];
+static int               s_abuf_n;
+static uint32_t          s_adc_hz, s_audio_decim;
+static volatile uint32_t s_ovf, s_ovf0, s_blocks, s_us_sum, s_us_max, s_beat_at;
+static volatile bool     s_beat_seen;
+
+static bool IRAM_ATTR on_ovf(adc_continuous_handle_t h, const adc_continuous_evt_data_t *e, void *u)
+{
+    (void)h; (void)e; (void)u;
+    s_ovf++;
+    return false;
+}
+
+static void audio_publish_off(void)
+{
+    for (int b = 0; b < AUDIO_BANDS; b++) g_env.band[b] = 0;
+    g_env.level = 0;
+    g_env.beats = 0;
+    s_beat_seen = false;
+}
 
 static void adc_stop(void)
 {
@@ -214,44 +240,86 @@ static void adc_stop(void)
     s_adc = NULL;
 }
 
-/* (Re)start the ADC for the analog inputs configured now: every one gets READ_HZ readings, each the average of
- * s_decim conversions (the chip's minimum rate is higher than we need on the ESP32). */
+/* (Re)start the ADC for the analog and audio inputs configured now. All of them are converted at the same rate (the
+ * ADC goes round them in turn): analog inputs get READ_HZ readings, each the average of s_decim conversions; the
+ * audio input AUDIO_RATE samples, each the average of a few conversions (a little anti-aliasing for free). */
 static void adc_start(void)
 {
     adc_stop();
     adc_digi_pattern_config_t pat[SOC_ADC_PATT_LEN_MAX];
-    int np = 0;
+    int np = 0, audio = -1;
     for (int i = 0; i < SOC_ADC_MAX_CHANNEL_NUM; i++) s_adc_slot[i] = -1;
     for (int i = 0; i < IO_MAX && np < SOC_ADC_PATT_LEN_MAX; i++) {
         adc_channel_t ch;
-        if (s_cfg[i].gpio < 0 || s_cfg[i].mode != IO_ANALOG || !s_ok[i] || !adc1_channel(s_cfg[i].gpio, &ch)) continue;
+        if (s_cfg[i].gpio < 0 || !io_mode_is_adc(s_cfg[i].mode) || !s_ok[i] || !adc1_channel(s_cfg[i].gpio, &ch)) continue;
         pat[np++] = (adc_digi_pattern_config_t){ .atten = ADC_ATTEN_DB_12, .channel = ch, .unit = ADC_UNIT_1,
                                                  .bit_width = SOC_ADC_DIGI_MAX_BITWIDTH };
         s_adc_slot[ch] = (int8_t)i;
         s_acc[i] = s_acc_n[i] = 0;
+        if (s_cfg[i].mode == IO_AUDIO) audio = i;
     }
+    s_audio_slot = -1;
+    audio_publish_off();
     if (!np) return;
-    uint32_t total = READ_HZ * 2 * np;                 /* at least 2 conversions per reading */
-    if (total < SOC_ADC_SAMPLE_FREQ_THRES_LOW) total = SOC_ADC_SAMPLE_FREQ_THRES_LOW;
-    total = (total + np * READ_HZ - 1) / (np * READ_HZ) * (np * READ_HZ);    /* a whole number of conversions per reading */
-    s_decim = total / (np * READ_HZ);
+    uint32_t per;                                      /* conversions per second of each input */
+    if (audio >= 0) {
+        uint32_t k = 2;                                /* 16 kHz, 2 per sample, if the ADC allows */
+        while (AUDIO_RATE * k * np < SOC_ADC_SAMPLE_FREQ_THRES_LOW) k++;
+        while (k > 1 && AUDIO_RATE * k * np > SOC_ADC_SAMPLE_FREQ_THRES_HIGH) k--;
+        per = AUDIO_RATE * k;
+        s_audio_decim = k;
+    } else {
+        per = READ_HZ * 2;                             /* at least 2 conversions per reading */
+        if (per * np < SOC_ADC_SAMPLE_FREQ_THRES_LOW) per = (SOC_ADC_SAMPLE_FREQ_THRES_LOW + np - 1) / np;
+        per = (per + READ_HZ - 1) / READ_HZ * READ_HZ; /* a whole number of conversions per reading */
+    }
+    uint32_t total = per * np;
+    s_decim = per / READ_HZ;
     uint32_t frame = total / 200 * SOC_ADC_DIGI_RESULT_BYTES;              /* ~5 ms of conversions */
     frame = (frame + SOC_ADC_DIGI_DATA_BYTES_PER_CONV - 1) / SOC_ADC_DIGI_DATA_BYTES_PER_CONV * SOC_ADC_DIGI_DATA_BYTES_PER_CONV;
     if (frame < SOC_ADC_DIGI_DATA_BYTES_PER_CONV * 4) frame = SOC_ADC_DIGI_DATA_BYTES_PER_CONV * 4;
     if (frame > sizeof s_conv) frame = sizeof s_conv;
-    adc_continuous_handle_cfg_t hc = { .max_store_buf_size = frame * 4, .conv_frame_size = frame, .flags.flush_pool = 1 };
+    uint32_t store = frame * 4;                        /* room for ~40 ms, so a busy moment loses nothing */
+    while (store < total / 25 * SOC_ADC_DIGI_RESULT_BYTES) store += frame;
+    adc_continuous_handle_cfg_t hc = { .max_store_buf_size = store, .conv_frame_size = frame, .flags.flush_pool = 1 };
     adc_continuous_config_t cc = { .pattern_num = (uint32_t)np, .adc_pattern = pat, .sample_freq_hz = total,
                                    .conv_mode = ADC_CONV_SINGLE_UNIT_1 };
+    adc_continuous_evt_cbs_t cbs = { .on_pool_ovf = on_ovf };
     esp_err_t e = adc_continuous_new_handle(&hc, &s_adc);
     if (e == ESP_OK) e = adc_continuous_config(s_adc, &cc);
+    if (e == ESP_OK) e = adc_continuous_register_event_callbacks(s_adc, &cbs, NULL);
     if (e == ESP_OK) e = adc_continuous_start(s_adc);
     if (e != ESP_OK) {
         ESP_LOGE(TAG, "analog inputs: adc failed (%s)", esp_err_to_name(e));
         if (s_adc) { adc_continuous_deinit(s_adc); s_adc = NULL; }
         return;
     }
-    ESP_LOGI(TAG, "analog inputs: %d on the adc at %lu Hz, %lu conversions per reading", np, (unsigned long)total,
-             (unsigned long)s_decim);
+    s_adc_hz = total;
+    if (audio >= 0) {
+        audio_init(&s_audio);
+        s_abuf_n = 0;
+        s_audio_slot = audio;
+        io_audio_stat_reset();
+    }
+    ESP_LOGI(TAG, "analog inputs: %d on the adc at %lu Hz, %lu conversions per reading%s", np, (unsigned long)total,
+             (unsigned long)(per / READ_HZ), audio >= 0 ? " (audio: 8 kHz)" : "");
+}
+
+static void audio_sample(uint16_t v)
+{
+    s_abuf[s_abuf_n++] = v;
+    if (s_abuf_n < AUDIO_N) return;
+    s_abuf_n = 0;
+    int64_t t0 = esp_timer_get_time();
+    audio_block(&s_audio, s_abuf, (uint32_t)(t0 / 1000));
+    uint32_t us = (uint32_t)(esp_timer_get_time() - t0);
+    s_blocks++;
+    s_us_sum += us;
+    if (us > s_us_max) s_us_max = us;
+    for (int b = 0; b < AUDIO_BANDS; b++) g_env.band[b] = s_audio.band[b];
+    g_env.level = s_audio.level;
+    g_env.beats = s_audio.beats;
+    if (s_audio.beat) { s_beat_at = s_audio.beat_at; s_beat_seen = true; }
 }
 
 static void adc_poll(void)
@@ -266,14 +334,44 @@ static void adc_poll(void)
             int i = s_adc_slot[d->channel];
             if (i < 0) continue;
             s_acc[i] += d->raw_data > ADC_MAX ? ADC_MAX : d->raw_data;
-            if (++s_acc_n[i] < s_decim) continue;
+            uint32_t decim = i == s_audio_slot ? s_audio_decim : s_decim;
+            if (++s_acc_n[i] < decim) continue;
+            uint16_t v = (uint16_t)((s_acc[i] + decim / 2) / decim);
+            s_acc[i] = s_acc_n[i] = 0;
+            if (i == s_audio_slot) { audio_sample(v); continue; }
             uint16_t at = s_ring_at[i];
-            s_ring[i][at] = (uint16_t)((s_acc[i] + s_decim / 2) / s_decim);
+            s_ring[i][at] = v;
             s_ring_at[i] = (uint16_t)((at + 1) % IO_SAMPLES_MAX);
             if (s_ring_n[i] < IO_SAMPLES_MAX) s_ring_n[i]++;
-            s_acc[i] = s_acc_n[i] = 0;
         }
     }
+}
+
+void io_audio_stat_reset(void)
+{
+    s_blocks = s_us_sum = s_us_max = 0;
+    s_ovf0 = s_ovf;
+}
+
+void io_audio_stat(io_audio_stat_t *st)
+{
+    memset(st, 0, sizeof *st);
+    st->slot = s_audio_slot;
+    if (s_audio_slot < 0) return;
+    st->adc_hz = s_adc_hz;
+    st->per_sample = s_audio_decim;
+    st->blocks = s_blocks;
+    st->dropped = s_ovf - s_ovf0;
+    st->us_avg = s_blocks ? s_us_sum / s_blocks : 0;
+    st->us_max = s_us_max;
+    st->a = s_audio;                                   /* may tear while a block is analysed: fine for a display */
+}
+
+int32_t io_audio_beatms(void)
+{
+    if (s_audio_slot < 0 || !s_beat_seen) return -1;
+    uint32_t d = (uint32_t)(esp_timer_get_time() / 1000) - s_beat_at;
+    return d > 0x7FFFFFFF ? 0x7FFFFFFF : (int32_t)d;
 }
 
 static void inputs_task(void *arg)
@@ -332,7 +430,7 @@ void io_apply(void)
     for (int i = 0; i < IO_MAX; i++) {
         if (s_cfg[i].gpio < 0 || !s_ok[i] || io_mode_is_output(s_cfg[i].mode)) continue;
         any_in = true;
-        if (s_cfg[i].mode == IO_ANALOG) sig |= (uint64_t)(s_cfg[i].gpio + 1) << (i * 8);
+        if (io_mode_is_adc(s_cfg[i].mode)) sig |= (uint64_t)((s_cfg[i].gpio + 1) | (s_cfg[i].mode == IO_AUDIO ? 0x80 : 0)) << (i * 8);
     }
     if (sig != s_analog_sig) { s_analog_sig = sig; s_adc_gen++; }
     if (any_in && !s_task) xTaskCreate(inputs_task, "inputs", 3072, NULL, tskIDLE_PRIORITY + 3, &s_task);
@@ -387,6 +485,7 @@ uint16_t io_get(int n)
     if (n < 0 || n >= IO_MAX || !s_ok[n] || s_cfg[n].gpio < 0) return 0;
     if (s_cfg[n].mode == IO_INPUT) return io_in_get(n) ? 256 : 0;
     if (s_cfg[n].mode == IO_ANALOG) return (uint16_t)((io_analog_get(n, 16) * 256u + IO_ANALOG_FULL / 2) / IO_ANALOG_FULL);
+    if (s_cfg[n].mode == IO_AUDIO) return n == s_audio_slot ? (uint16_t)((g_env.level * 256u + AUDIO_ONE / 2) / AUDIO_ONE) : 0;
     return s_val[n];
 }
 bool io_working(int n) { return n >= 0 && n < IO_MAX && s_ok[n]; }

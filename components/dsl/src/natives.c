@@ -382,12 +382,17 @@ static value_t n_rotate(exec_ctx_t *c, const value_t *a, uint8_t n)
 static const char *const k_env_names[] = { "frame", "hour", "minute", "second", "year", "month", "day", "doy", "intensity", "npix",
                                            "sunrise", "sunset", "dawn", "dusk", "moon", "moonlit",
                                            "ms", "weekday", "timeset", "daylight", "daymin", "daysec",
-                                           "dayfrac", "hourfrac", "minfrac" };
+                                           "dayfrac", "hourfrac", "minfrac",
+                                           "band0", "band1", "band2", "band3", "band4", "band5", "band6", "band7", "level",
+                                           "beats", "beatms" };
 enum { ENV_FRAME, ENV_HOUR, ENV_MINUTE, ENV_SECOND, ENV_YEAR, ENV_MONTH, ENV_DAY, ENV_DOY, ENV_INTENSITY, ENV_NPIX,
        ENV_SUNRISE, ENV_SUNSET, ENV_DAWN, ENV_DUSK, ENV_MOON, ENV_MOONLIT,
        ENV_MS, ENV_WEEKDAY, ENV_TIMESET, ENV_DAYLIGHT, ENV_DAYMIN, ENV_DAYSEC,
-       ENV_DAYFRAC, ENV_HOURFRAC, ENV_MINFRAC, ENV_COUNT };
-#define ENV_FIRST_FRAC ENV_DAYFRAC      /* from here on the values are decimals 0.0 <= x < 1.0 */
+       ENV_DAYFRAC, ENV_HOURFRAC, ENV_MINFRAC,
+       ENV_BAND0, ENV_LEVEL = ENV_BAND0 + DSL_AUDIO_BANDS, ENV_BEATS, ENV_BEATMS, ENV_COUNT };
+_Static_assert(sizeof k_env_names / sizeof k_env_names[0] == ENV_COUNT, "k_env_names must list every ENV_*");
+/* decimals: the fractions (0.0 <= x < 1.0), the audio bands and level (0..1) */
+static bool env_is_fix(int i) { return (i >= ENV_DAYFRAC && i <= ENV_MINFRAC) || (i >= ENV_BAND0 && i <= ENV_LEVEL); }
 
 /* Levenshtein distance of two short names, or `cap` once it reaches it (names longer than 15 count as far). */
 static int edit_distance(const char *a, const char *b, int cap)
@@ -420,7 +425,7 @@ static const char *bind_env(node_t *n, uint8_t *bad)
     for (int i = 0; i < ENV_COUNT; i++)
         if (!strcmp(args[0].val.u.sym, k_env_names[i])) {
             args[0].val.type = V_INT; args[0].val.u.i = i;
-            n->ret = i >= ENV_FIRST_FRAC ? V_FIX : V_INT;
+            n->ret = env_is_fix(i) ? V_FIX : V_INT;
             return NULL;
         }
     /* The names don't fit an error message: suggest the closest one (at most 2 edits), else point at the reference. */
@@ -475,6 +480,15 @@ static value_t n_env(exec_ctx_t *c, const value_t *a, uint8_t n)
     case ENV_DAYFRAC:   v.type = V_FIX; v.u.i = frac_of(sec * 1000 + e->ms, 86400000); break;
     case ENV_HOURFRAC:  v.type = V_FIX; v.u.i = frac_of((sec % 3600) * 1000 + e->ms, 3600000); break;
     case ENV_MINFRAC:   v.type = V_FIX; v.u.i = frac_of((int64_t)e->second * 1000 + e->ms, 60000); break;
+    case ENV_LEVEL:     v.type = V_FIX; v.u.i = (int32_t)(e->level > 65536 ? 65536 : e->level); break;
+    case ENV_BEATS:     v.u.i = (int32_t)(e->beats & 0x7FFFFFFFu); break;
+    case ENV_BEATMS:    v.u.i = e->beatms; break;
+    default:
+        if (a[0].u.i >= ENV_BAND0 && a[0].u.i < ENV_LEVEL) {
+            uint32_t b = e->band[a[0].u.i - ENV_BAND0];
+            v.type = V_FIX; v.u.i = (int32_t)(b > 65536 ? 65536 : b);
+        }
+        break;
     }
     return v;
 }
@@ -1376,7 +1390,7 @@ enum { WANT_OUTPUT, WANT_INPUT, WANT_ANALOG };
 static const char *bind_slot(node_t *n, int want)
 {
     static const char *const what[] = { "output", "input", "analog input" };
-    static char msg[64];                  /* compiles are serialized (cmd_lock on a board, one thread in WASM) */
+    static char msg[96];                  /* compiles are serialized (cmd_lock on a board, one thread in WASM) */
     arg_t *o = &n->args[0];
     if (!o->node && o->val.type == V_SYM) {
         int slot = s_host && s_host->io_find ? s_host->io_find(o->val.u.sym) : -1;
@@ -1392,8 +1406,10 @@ static const char *bind_slot(node_t *n, int want)
         bool ok = want == WANT_OUTPUT ? (m == DSL_IO_BINARY || m == DSL_IO_PWM) : want == WANT_INPUT ? m == DSL_IO_INPUT : m == DSL_IO_ANALOG;
         if (!ok) {
             static const char *const hint[] = { "read it with (in x) or (analog x)", "", "" };
-            const char *mode = m == DSL_IO_INPUT ? "a digital input" : m == DSL_IO_ANALOG ? "an analog input" : "an output";
-            if (want == WANT_OUTPUT) snprintf(msg, sizeof msg, "that is %s: %s", mode, hint[0]);
+            const char *mode = m == DSL_IO_INPUT ? "a digital input" : m == DSL_IO_ANALOG ? "an analog input"
+                             : m == DSL_IO_AUDIO ? "an audio input" : "an output";
+            if (m == DSL_IO_AUDIO) snprintf(msg, sizeof msg, "that is an audio input: its values are (env band0) .. (env beatms)");
+            else if (want == WANT_OUTPUT) snprintf(msg, sizeof msg, "that is %s: %s", mode, hint[0]);
             else snprintf(msg, sizeof msg, "that is %s, not an %s", mode, what[want]);
             return msg;
         }
@@ -1419,7 +1435,7 @@ static const char *check_io(int32_t n)
     if (!s_host || !s_host->io_used || !s_host->io_get || !s_host->io_set) return "outputs aren't available here";
     if (!s_host->io_used(n)) return "no such output";
     int m = s_host->io_mode ? s_host->io_mode(n) : -1;
-    return m == DSL_IO_INPUT || m == DSL_IO_ANALOG ? "that is an input now (io-set/io are for outputs)" : NULL;
+    return m == DSL_IO_INPUT || m == DSL_IO_ANALOG || m == DSL_IO_AUDIO ? "that is an input now (io-set/io are for outputs)" : NULL;
 }
 
 /* (in x) -> t / nil: a digital input, debounced, after invert. Fine in channel programs: it reads a cached value. */

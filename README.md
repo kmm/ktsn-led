@@ -113,6 +113,11 @@ debounced) or `(analog knob)` (0..1, averaged). The C6 build starts with GPIO 19
                                             invert: a low pin reads t; trigger: run automation after each change;
                                             ESP32 GPIO 34..39 have no pull resistors: pull=none + a resistor)
     io config 4 34 analog name=knob         analog input: ADC1 pins only (ESP32 GPIO 32..39, C6 GPIO 0..6)
+    io config 5 1 audio name=mic            audio input (experimental): an analog microphone module (e.g. MAX9814,
+                                            MAX4466) on an ADC1 pin, one at most; programs read (env band0) .. band7,
+                                            level, beats, beatms
+    audio                    the audio analysis: sample rate, time per block, bands, level, beats, swing
+    audio watch 20           print bands, level and beats 4 times a second for 20 s (`audio reset` clears timings)
     io config 2 off          remove it (its pin is let go)
 
 A segment display wired as one LED strip: `seg7`, `seg9` and `seg14` draw a number or text as a mask (lit segments
@@ -198,9 +203,9 @@ first; null clears it); `GET /api/status` → `automation` shows runs, the last 
 
 GPIO slots: `PATCH /api/config` with `{"io": {"2": {"gpio": 4, "mode": "pwm", "freq": 500, "invert": false,
 "name": "fan"}}}` sets one up (`null` removes it); modes are `binary`, `pwm`, `input` (with `pull` up/down/none,
-`debounce` ms, `trigger`) and `analog`. `{"io_set": {"pump": true, "2": 0.4}}` switches or dims outputs by number or
+`debounce` ms, `trigger`), `analog` and `audio`. `{"io_set": {"pump": true, "2": 0.4}}` switches or dims outputs by number or
 name. `GET /api/config` → `io` lists them, `GET /api/status` → `io` gives each one's mode and value (0..1; inputs 0 or
-1, analog the latest 16 readings averaged).
+1, analog the latest 16 readings averaged, audio the level).
 
 `GET /api/lib` lists the library (`{programs: [{name, size}], used, total}`), `GET /api/lib/<name>` gives
 `{name, src}`, `PUT /api/lib/<name>` stores the body (compiled first), `DELETE /api/lib/<name>` removes it (409 with
@@ -247,6 +252,7 @@ Programs sent over HTTP may be up to 3999 characters, span several lines and con
                                                 daymin daysec timeset intensity npix sunrise sunset
                                                 dawn dusk daylight moon moonlit -> int
                                                 dayfrac hourfrac minfrac -> number 0..<1
+                                                band0 .. band7 level -> number 0..1; beats beatms -> int
     (time-gt t) time-ge time-lt time-le time-eq the time of day vs t: "HH:MM", "HH:MM:SS" or minutes after
                                                 midnight, at the precision given      -> boolean
     (time-in from to)                           from <= now < to, wraps past midnight -> boolean
@@ -321,6 +327,11 @@ midnight, `daysec` seconds, and `dayfrac`, `hourfrac`, `minfrac` how far through
 (decimals 0 up to just below 1, smooth with the ms): `(set (buf O) (floor (* (env minfrac) (env npix))) #0000FF)` is a
 dot going round once a minute.
 Decimals are converted at compile time (Q16.16, then Q8 for scale args); no floats at run time.
+Sound (experimental), with an audio input: `(env band0)` .. `(env band7)` are how loud each of 8 bands is, about an
+octave each from 31 Hz (kick drum) to 4 kHz, and `(env level)` the overall loudness, all 0..1 with an automatic gain,
+updated every 32 ms. `(env beats)` counts beats (sudden bass), `(env beatms)` is the ms since the latest (-1 before
+the first or without an audio input), so `(if (lt (env beatms) 80) (fill (buf O) #FFFFFF))` flashes on every beat and
+`(fill (buf O) #FF0000 0 (round (* (env band0) (env npix))))` is a bass meter.
 ```
 
 ## License

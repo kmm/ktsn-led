@@ -406,7 +406,7 @@ api_result_t api_patch_config(const cJSON *root)
                 if (mo) {
                     snprintf(key, sizeof key, "io.%s.mode", c->string);
                     int m = cJSON_IsString(mo) ? io_mode_parse(mo->valuestring) : -1;
-                    if (m < 0) { err_at(errs, key, "must be \"binary\", \"pwm\", \"input\" or \"analog\""); continue; }
+                    if (m < 0) { err_at(errs, key, "must be \"binary\", \"pwm\", \"input\", \"analog\" or \"audio\""); continue; }
                     if (m == IO_INPUT && nc.mode != IO_INPUT && !pl) nc.pull = IO_PULL_UP;   /* a new input: pull up unless told */
                     nc.mode = (uint8_t)m;
                 }

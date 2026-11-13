@@ -32,7 +32,7 @@ export interface BoardStatus {
 /** A GPIO slot: an output (relay, PWM; always off at boot) or an input (digital, analog). Configuration applies at
  *  once, `save` keeps it. pull/debounce/trigger: digital inputs; missing on firmware from before inputs. */
 export interface BoardIo {
-  n: number; gpio: number; mode: 'binary' | 'pwm' | 'input' | 'analog'; freq: number; invert: boolean; name: string;
+  n: number; gpio: number; mode: 'binary' | 'pwm' | 'input' | 'analog' | 'audio'; freq: number; invert: boolean; name: string;
   pull?: 'up' | 'down' | 'none'; debounce?: number; trigger?: boolean;
 }
 export const isOutputMode = (m: BoardIo['mode']) => m === 'binary' || m === 'pwm';

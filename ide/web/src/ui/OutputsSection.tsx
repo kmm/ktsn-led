@@ -18,6 +18,7 @@ const MODES: { mode: BoardIo['mode']; title: string }[] = [
   { mode: 'pwm', title: 'Output: a level 0..1 (dimmer, fan)' },
   { mode: 'input', title: 'Digital input: (in name) -> t / nil' },
   { mode: 'analog', title: 'Analog input: (analog name) -> 0..1 (ADC1 pins only)' },
+  { mode: 'audio', title: 'Audio input (microphone module, ADC1 pin, one at most): (env band0) .. (env band7), level, beats, beatms' },
 ];
 
 /** The Board panel's GPIO slots: outputs to switch / dim, inputs to watch, and their setup (pin, mode, frequency,
@@ -75,6 +76,7 @@ export function OutputsSection({ t, config, status, act, refresh, pollNow }: Pro
                   {st && !st.ok ? <span className="bad" title="Not set up: see the board's log">error</span>
                     : o.mode === 'input' ? <span className={v ? 'good' : 'muted'} title="Read by (in …); refreshed with the status">{v ? 'on' : 'off'}</span>
                     : o.mode === 'analog' ? <span className="num" title="Read by (analog …); refreshed with the status">{v.toFixed(2)}</span>
+                    : o.mode === 'audio' ? <span className="num" title="The level, (env level); refreshed with the status">{v.toFixed(2)}</span>
                     : o.mode === 'binary'
                       ? <button className={v ? 'primary' : ''} onClick={() => void set(o, !v)} title="Switch it">{v ? 'on' : 'off'}</button>
                       : <><input type="range" min={0} max={100} value={level[o.n] ?? Math.round(v * 100)}

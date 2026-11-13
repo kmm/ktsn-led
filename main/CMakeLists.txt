@@ -1,4 +1,4 @@
-set(srcs "main.c" "render.c" "led_out.c" "gamma.c" "wire.c" "astro.c" "sky.c" "progs.c" "automation.c" "firmware.c" "cmd.c" "console.c" "settings.c" "io.c")
+set(srcs "main.c" "render.c" "led_out.c" "gamma.c" "wire.c" "astro.c" "audio.c" "sky.c" "progs.c" "automation.c" "firmware.c" "cmd.c" "console.c" "settings.c" "io.c")
 
 # WiFi/NTP is optional (menuconfig: KTSN LED -> WiFi). CONFIG_ values aren't known yet when IDF resolves REQUIRES,
 # so the network components are always listed; without net.c nothing references them and the linker drops them.

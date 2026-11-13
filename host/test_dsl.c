@@ -6,6 +6,7 @@
 #include "wire.h"
 #include "fader.h"
 #include "astro.h"
+#include "audio.h"
 #include <stdint.h>
 #include <math.h>
 #include <stdio.h>
@@ -13,12 +14,15 @@
 #include <string.h>
 
 #include "astro_cases.h"
+#ifndef M_PI
+#define M_PI 3.14159265358979323846               /* not in strict C11 math.h (glibc) */
+#endif
 #define LIT_AT 43200    /* the almanac's illumination is for 12:00 UTC */
 
 static int g_fail, g_checks;
 #define CHECK(c) do { g_checks++; if (!(c)) { g_fail++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
 
-static env_t env = { .intensity = 256 };
+static env_t env = { .intensity = 256, .beatms = -1 };
 static globals_t globals;
 
 static void with_channel(void (*fn)(channel_t *))
@@ -1283,6 +1287,17 @@ static void t_env_time(channel_t *ch)
     CHECK(dsl_true(ch, "(eq (env daysec) 86399)"));
     env.second = 60;                                                      /* a leap second never reaches 1 */
     CHECK(dsl_true(ch, "(lt (env minfrac) 1)"));
+    /* audio: bands and level are decimals 0..1, beats and beatms ints */
+    env = (env_t){ .intensity = 256, .band = { 65536, 32768, 0, 0, 0, 0, 0, 16384 }, .level = 70000, .beats = 12, .beatms = 340 };
+    CHECK(dsl_true(ch, "(and (eq (env band0) 1) (eq (env band1) 0.5) (eq (env band2) 0) (eq (env band7) 0.25))"));
+    CHECK(dsl_true(ch, "(eq (env level) 1)"));                           /* clamped */
+    CHECK(dsl_true(ch, "(and (eq (env beats) 12) (eq (env beatms) 340) (lt (env beatms) 400))"));
+    CHECK(run(ch, "(fill (buf O) #000000) (fill (buf O) #FF0000 0 (round (* (env band1) (env npix))))", e) == 0
+          && ch->buf[BUF_O][4] == 0xFF0000 && ch->buf[BUF_O][5] == 0);
+    CHECK(channel_set_source(ch, "(fill (buf O) #FF0000 0 (env band1))", e, sizeof e) != 0);   /* a decimal: no index */
+    CHECK(channel_set_source(ch, "(def x (env band8))", e, sizeof e) != 0 && strstr(e, "did you mean band"));
+    env = (env_t){ .intensity = 256, .beatms = -1 };
+    CHECK(dsl_true(ch, "(and (eq (env beatms) -1) (eq (env beats) 0) (eq (env level) 0))"));
     /* Fractions scale a length directly; whole-number names stay ints for ranges. */
     env = (env_t){ .hour = 12, .intensity = 256 };
     CHECK(run(ch, "(fill (buf O) #000000) (fill (buf O) #FF0000 0 (round (* (env dayfrac) (env npix))))", e) == 0);
@@ -1950,13 +1965,13 @@ static void t_io(channel_t *ch)
     ch->ctx = DSL_CTX_RENDER;
 }
 
-/* inputs: slot 4 "button" (digital), 5 "knob" (analog); fin_mode lets a test change a slot's mode behind a program */
+/* inputs: slot 4 "button" (digital), 5 "knob" (analog), 6 "mic" (audio); fin_mode lets a test change a slot's mode behind a program */
 static bool     fin_button;
 static uint32_t fin_knob;
 static int      fin_samples, fin_mode4 = DSL_IO_INPUT;
-static int  fin_find(const char *n) { return !strcmp(n, "button") ? 4 : !strcmp(n, "knob") ? 5 : fio_find(n); }
-static bool fin_used(int n) { return fio_used(n) || n == 4 || n == 5; }
-static int  fin_mode(int n) { return n == 0 ? DSL_IO_BINARY : n == 2 ? DSL_IO_PWM : n == 4 ? fin_mode4 : n == 5 ? DSL_IO_ANALOG : -1; }
+static int  fin_find(const char *n) { return !strcmp(n, "button") ? 4 : !strcmp(n, "knob") ? 5 : !strcmp(n, "mic") ? 6 : fio_find(n); }
+static bool fin_used(int n) { return fio_used(n) || n == 4 || n == 5 || n == 6; }
+static int  fin_mode(int n) { return n == 0 ? DSL_IO_BINARY : n == 2 ? DSL_IO_PWM : n == 4 ? fin_mode4 : n == 5 ? DSL_IO_ANALOG : n == 6 ? DSL_IO_AUDIO : -1; }
 static bool fin_get(int n) { return n == 4 && fin_button; }
 static uint32_t fin_analog(int n, int samples) { fin_samples = samples; return n == 5 ? fin_knob : 0; }
 
@@ -2005,6 +2020,7 @@ static void t_inputs(channel_t *ch)
         { "(analog knob 257)", "samples must be 1..256" },       { "(analog knob 0.5)", NULL },
         { "(in)", NULL },                                        { "(in button 1)", NULL },
         { "(if (in button 1) 0)", NULL },                        { "(fill (buf O) (in button))", NULL },
+        { "(in mic)", "that is an audio input: its values are (env band0)" }, { "(analog mic)", "that is an audio input" },
     };
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         bool failed = channel_set_source(ch, bad[i].src, e, sizeof e) != 0;
@@ -2015,6 +2031,7 @@ static void t_inputs(channel_t *ch)
     ch->ctx = DSL_CTX_AUTOMATION;
     CHECK(channel_set_source(ch, "(io-set button t)", e, sizeof e) != 0 && strstr(e, "that is a digital input: read it with (in x)"));
     CHECK(channel_set_source(ch, "(io knob)", e, sizeof e) != 0 && strstr(e, "that is an analog input"));
+    CHECK(channel_set_source(ch, "(io-set mic t)", e, sizeof e) != 0 && strstr(e, "that is an audio input"));
     CHECK(run(ch, "(if (in button) (io-set pump t) (io-set pump nil))", e) == 0 && fio[0] == 0);   /* automation reads inputs too */
     fin_button = true;
     CHECK(run(ch, "(if (in button) (io-set pump t) (io-set pump nil))", e) == 0 && fio[0] == 256);
@@ -2441,11 +2458,154 @@ static void t_use(channel_t *ch)
     dsl_set_host(NULL);
 }
 
+/* ---- audio analysis (main/audio.c) ---- */
+
+static uint32_t t_rng = 12345;
+static double t_noise(void) { t_rng ^= t_rng << 13; t_rng ^= t_rng >> 17; t_rng ^= t_rng << 5; return (t_rng / 4294967296.0) * 2 - 1; }
+
+/* A synthetic track: a kick (60 Hz, 80 ms, falling) every `beat_ms` (0 = none), a 1 kHz tone and noise; `vol` scales
+ * all of it (ADC counts around 2048). Feeds `secs` seconds to `a`. */
+static double t_bassline;                        /* amplitude of a steady 80 Hz bass under the kicks */
+static void t_track(audio_t *a, double secs, double vol, int beat_ms, double tone, double noise, uint32_t *t_ms)
+{
+    uint16_t blk[AUDIO_N];
+    int nblk = (int)(secs * 1000 / AUDIO_HOP_MS);
+    for (int b = 0; b < nblk; b++) {
+        for (int n = 0; n < AUDIO_N; n++) {
+            double t = (*t_ms + n * 1000.0 / AUDIO_RATE) / 1000.0;
+            double v = tone * sin(2 * M_PI * 1000 * t) + noise * t_noise() + t_bassline * sin(2 * M_PI * 80 * t);
+            if (beat_ms) {
+                double tb = fmod(t * 1000, beat_ms) / 1000;
+                if (tb < 0.08) v += sin(2 * M_PI * 60 * tb) * (1 - tb / 0.08);
+            }
+            double x = 2048 + vol * v;
+            blk[n] = (uint16_t)(x < 0 ? 0 : x > 4095 ? 4095 : x);
+        }
+        audio_block(a, blk, *t_ms);
+        *t_ms += AUDIO_HOP_MS;
+    }
+}
+
+static void t_audio(void)
+{
+    /* log2 */
+    int worst = 0;
+    for (uint64_t x = 2; x < (1ull << 40); x = x * 3 / 2 + 1) {
+        int e = abs(audio_log2q8(x) - (int)lround(log2((double)x) * 256));
+        if (e > worst) worst = e;
+    }
+    CHECK(worst <= 3);
+    CHECK(audio_log2q8(0) == 0 && audio_log2q8(1) == 0 && audio_log2q8(2) == 256 && audio_log2q8(1024) == 2560);
+
+    /* FFT against a DFT in doubles */
+    static int16_t re[AUDIO_N], im[AUDIO_N];
+    double xr[AUDIO_N];
+    for (int n = 0; n < AUDIO_N; n++) { xr[n] = round(t_noise() * 16000); re[n] = (int16_t)xr[n]; im[n] = 0; }
+    audio_fft256(re, im);
+    double err = 0;
+    for (int k = 0; k < AUDIO_N; k++) {
+        double sr = 0, si = 0;
+        for (int n = 0; n < AUDIO_N; n++) { sr += xr[n] * cos(2 * M_PI * k * n / AUDIO_N); si -= xr[n] * sin(2 * M_PI * k * n / AUDIO_N); }
+        err = fmax(err, fmax(fabs(sr / AUDIO_N - re[k]), fabs(si / AUDIO_N - im[k])));
+    }
+    CHECK(err < 4);
+    /* full-scale square wave and an impulse: no overflow (UBSan), right values */
+    for (int n = 0; n < AUDIO_N; n++) { re[n] = (n & 16) ? -16384 : 16384; im[n] = 0; }
+    audio_fft256(re, im);
+    CHECK(abs(re[0]) <= 2 && abs(im[0]) <= 2);
+    CHECK(fabs(hypot(re[8], im[8]) - 16384 * 2 / M_PI) < 60);                     /* fundamental at bin 8: 2A/pi */
+    CHECK(hypot(re[9], im[9]) < 60 && hypot(re[16], im[16]) < 60);                /* no even harmonics */
+    for (int n = 0; n < AUDIO_N; n++) { re[n] = n ? 0 : 16384; im[n] = 0; }
+    audio_fft256(re, im);
+    CHECK(re[0] == 64 && re[77] == 64 && re[255] == 64 && im[100] == 0);
+
+    /* edges cover bins 1..127 in order */
+    CHECK(audio_band_edges[0] == 1 && audio_band_edges[AUDIO_BANDS] == AUDIO_N / 2);
+    for (int b = 0; b < AUDIO_BANDS; b++) CHECK(audio_band_edges[b] < audio_band_edges[b + 1]);
+
+    /* a steady tone lands in its band, near 1 there, low elsewhere */
+    static const struct { double hz; int band; } tones[] = { { 45, 0 }, { 90, 1 }, { 170, 2 }, { 300, 3 }, { 500, 4 }, { 800, 5 }, { 1400, 6 }, { 3000, 7 } };
+    for (size_t i = 0; i < sizeof tones / sizeof tones[0]; i++) {
+        audio_t a; audio_init(&a);
+        uint16_t blk[AUDIO_N];
+        uint32_t t = 0;
+        for (int b = 0; b < 60; b++, t += AUDIO_HOP_MS) {
+            for (int n = 0; n < AUDIO_N; n++) blk[n] = (uint16_t)lround(2048 + 300 * sin(2 * M_PI * tones[i].hz * (b * AUDIO_N + n) / AUDIO_RATE) + 3 * t_noise());
+            audio_block(&a, blk, t);
+        }
+        int best = 0;
+        for (int b = 1; b < AUDIO_BANDS; b++) if (a.band[b] > a.band[best]) best = b;
+        
+        CHECK(best == tones[i].band);
+        CHECK(a.band[tones[i].band] > AUDIO_ONE * 9 / 10);
+        CHECK(a.level > AUDIO_ONE * 9 / 10);
+        CHECK(a.swing >= 290 && a.swing <= 400);          /* the block mean of a partial cycle isn't 2048 */
+        CHECK(a.beats == 0);
+    }
+
+    /* silence: nothing moves, no beats; after sound, outputs fall to 0 within ~200 ms */
+    {
+        audio_t a; audio_init(&a);
+        uint32_t t = 0;
+        t_track(&a, 3, 1, 0, 0, 2, &t);
+        CHECK(a.beats == 0 && a.level == 0 && a.band[0] == 0 && a.band[7] == 0 && a.swing < AUDIO_GATE);
+        t_track(&a, 2, 400, 0, 1, 0.2, &t);
+        CHECK(a.level > AUDIO_ONE / 2);
+        t_track(&a, 0.25, 1, 0, 0, 2, &t);
+        CHECK(a.level == 0 && a.band[5] == 0);
+    }
+
+    /* 120 bpm kicks over a tone and noise, loud and quiet: about one beat per kick, 500 ms apart */
+    static const double vols[] = { 1500, 300, 40 };
+    for (size_t v = 0; v < sizeof vols / sizeof vols[0]; v++) {
+        audio_t a; audio_init(&a);
+        uint32_t t = 0;
+        t_track(&a, 2, vols[v], 500, 0.4, 0.1, &t);           /* settle */
+        uint32_t b0 = a.beats, gaps_bad = 0, last = 0, first = 1, bass_max = 0;
+        for (int k = 0; k < 10000 / AUDIO_HOP_MS; k++) {
+            t_track(&a, AUDIO_HOP_MS / 1000.0, vols[v], 500, 0.4, 0.1, &t);
+            if (a.band[0] > bass_max) bass_max = a.band[0];
+            if (a.band[1] > bass_max) bass_max = a.band[1];
+            if (a.beat) {
+                if (!first && (a.beat_at - last < 450 || a.beat_at - last > 550)) gaps_bad++;
+                last = a.beat_at; first = 0;
+            }
+        }
+        uint32_t n = a.beats - b0;
+        if (n < 19 || n > 21 || gaps_bad) printf("audio: vol %g: %u beats in 10 s, %u bad gaps\n", vols[v], n, gaps_bad);
+        CHECK(n >= 19 && n <= 21);
+        CHECK(gaps_bad == 0);
+        CHECK(bass_max > AUDIO_ONE * 9 / 10);
+    }
+
+    /* kicks only ~6 dB above a steady bassline still count */
+    {
+        audio_t a; audio_init(&a);
+        uint32_t t = 0;
+        t_bassline = 0.5;
+        t_track(&a, 2, 500, 500, 0.3, 0.1, &t);
+        uint32_t b0 = a.beats;
+        t_track(&a, 10, 500, 500, 0.3, 0.1, &t);
+        t_bassline = 0;
+        if (a.beats - b0 < 17 || a.beats - b0 > 21) printf("audio: %u beats over a bassline\n", a.beats - b0);
+        CHECK(a.beats - b0 >= 17 && a.beats - b0 <= 21);
+    }
+
+    /* steady noise and a steady tone: (almost) no beats */
+    {
+        audio_t a; audio_init(&a);
+        uint32_t t = 0;
+        t_track(&a, 10, 300, 0, 0.3, 1, &t);
+        if (a.beats > 2) printf("audio: %u beats in steady noise\n", a.beats);
+        CHECK(a.beats <= 2);
+    }
+}
+
 int main(void)
 {
     CHECK(globals_init(&globals, 10) == 0);
     with_channel(t_fill); with_channel(t_scale_and_persistence); with_channel(t_invert); with_channel(t_nesting_globals);
-    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); t_astro(); with_channel(t_errors); with_channel(t_swap_atomic);
+    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); t_astro(); t_audio(); with_channel(t_errors); with_channel(t_swap_atomic);
     t_arena(); t_ws_parallel(); t_gamma(); t_dither(); t_wire(); t_wire_white(); t_wire_wmode(); t_fader(); t_intensity16(); t_px_scale_exhaustive(); t_blend_math(); t_stats();
     for (int i = 0; i < DSL_NUM_GLOBALS; i++) free(globals.buf[i]);
     printf("%d checks, %d failed\n", g_checks, g_fail);

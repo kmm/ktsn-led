@@ -3,6 +3,16 @@
 One version (`version.txt`) covers the firmware, the DSL, the console and HTTP API, and the IDE. Rules for bumping it
 are in CLAUDE.md ("Versioning"). Newest first; versions before 0.10.0 were not recorded here.
 
+## 0.21.0 (2026-11-12)
+- New (experimental, a prototype to measure on hardware): an audio input. `io config <n> <gpio> audio` on an ADC1 pin
+  (one at most) with an analog microphone module. The board samples it at 8 kHz and every 32 ms runs a 256-point
+  integer FFT: `(env band0)` .. `(env band7)` (about an octave each, 31 Hz .. 4 kHz) and `(env level)` are 0..1 with
+  an automatic gain, `(env beats)` counts beats (sudden bass), `(env beatms)` is the ms since the latest one (-1
+  before the first or without an audio input). All are 0 without one.
+- New console command `audio` (rate, analysis time per block, bands, level, beats, swing), `audio watch [s]`,
+  `audio reset`; `env` prints the audio values. The API and the Board panel take the mode `audio` (status value: the
+  level). The IDE preview has no sound yet: the values are 0 there.
+
 ## 0.20.0 (2026-11-12)
 - New: GPIO inputs. `io config <n> <gpio> input` sets up a digital input (pull up by default, or `pull=down|none`;
   `debounce=<ms>`, default 20; `invert`; `name=`), `io config <n> <gpio> analog` an analog one (ADC1 pins only:

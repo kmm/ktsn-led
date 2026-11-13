@@ -43,6 +43,7 @@ typedef struct {
 } value_t;
 
 /* ---- environment (written by the system, read by programs) ---- */
+#define DSL_AUDIO_BANDS 8
 typedef struct {
     uint32_t frame;
     uint16_t year;
@@ -57,6 +58,10 @@ typedef struct {
     int16_t  sunrise, sunset;    /* minutes after local midnight; -1 = no location, clock not set, or none that day */
     int16_t  dawn, dusk;         /* civil twilight, same */
     int16_t  moon, moonlit;      /* phase angle 0..359 (0 new, 180 full), percent lit; -1 = clock not set */
+    uint32_t band[DSL_AUDIO_BANDS];  /* audio input: energy per band, low to high, 0..65536 (= 1.0); 0 without one */
+    uint32_t level;              /* audio input: overall, 0..65536 */
+    uint32_t beats;              /* audio input: beats heard since it was set up */
+    int32_t  beatms;             /* ms since the latest beat; -1 = no audio input or no beat yet */
 } env_t;
 
 /* ---- perf stats ---- */
@@ -153,7 +158,7 @@ typedef struct {
     bool        (*in_get)(int n);
     uint32_t    (*analog_get)(int n, int samples);
 } dsl_host_t;
-enum { DSL_IO_BINARY = 0, DSL_IO_PWM, DSL_IO_INPUT, DSL_IO_ANALOG };
+enum { DSL_IO_BINARY = 0, DSL_IO_PWM, DSL_IO_INPUT, DSL_IO_ANALOG, DSL_IO_AUDIO };
 #define DSL_ANALOG_SAMPLES_DEFAULT 16
 #define DSL_ANALOG_SAMPLES_MAX     256
 void dsl_set_host(const dsl_host_t *h);

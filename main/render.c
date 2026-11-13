@@ -1,4 +1,5 @@
 #include "render.h"
+#include "io.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -135,6 +136,7 @@ static void env_tick(void)
     g_env.year = (uint16_t)(tm.tm_year + 1900); g_env.month = (uint8_t)(tm.tm_mon + 1); g_env.day = (uint8_t)tm.tm_mday;
     g_env.doy = (uint16_t)(tm.tm_yday + 1);
     g_env.hour = (uint8_t)tm.tm_hour; g_env.minute = (uint8_t)tm.tm_min; g_env.second = (uint8_t)tm.tm_sec;
+    g_env.beatms = io_audio_beatms();
 }
 
 static void render_task(void *arg)

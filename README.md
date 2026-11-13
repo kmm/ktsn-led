@@ -206,7 +206,8 @@ GPIO slots: `PATCH /api/config` with `{"io": {"2": {"gpio": 4, "mode": "pwm", "f
 "name": "fan"}}}` sets one up (`null` removes it); modes are `binary`, `pwm`, `input` (with `pull` up/down/none,
 `debounce` ms, `trigger`), `analog` and `audio`. `{"io_set": {"pump": true, "2": 0.4}}` switches or dims outputs by number or
 name. `GET /api/config` → `io` lists them, `GET /api/status` → `io` gives each one's mode and value (0..1; inputs 0 or
-1, analog the latest 16 readings averaged, audio the level).
+1, analog the latest 16 readings averaged, audio the level); `audio` is the audio input's analysis (`bands`, `level`,
+`beats`, `beatms`, `swing`, `us_avg` / `us_max` per block, `overflows`) or null.
 
 `GET /api/lib` lists the library (`{programs: [{name, size}], used, total}`), `GET /api/lib/<name>` gives
 `{name, src}`, `PUT /api/lib/<name>` stores the body (compiled first), `DELETE /api/lib/<name>` removes it (409 with
@@ -330,8 +331,8 @@ dot going round once a minute.
 Decimals are converted at compile time (Q16.16, then Q8 for scale args); no floats at run time.
 Sound (experimental), with an audio input: `(env band0)` .. `(env band7)` are how loud each of 8 bands is, about an
 octave each from 31 Hz (kick drum) to 4 kHz, and `(env level)` the overall loudness, all 0..1 with an automatic gain,
-updated every 32 ms. `(env beats)` counts beats (sudden bass), `(env beatms)` is the ms since the latest (-1 before
-the first or without an audio input), so `(if (lt (env beatms) 80) (fill (buf O) #FFFFFF))` flashes on every beat and
+updated every 32 ms. `(env beats)` counts beats (sudden bass), `(env beatms)` is the ms since the latest (2147483647
+before the first or without an audio input, so it reads as long ago), so `(if (lt (env beatms) 80) (fill (buf O) #FFFFFF))` flashes on every beat and
 `(fill (buf O) #FF0000 0 (round (* (env band0) (env npix))))` is a bass meter.
 ```
 

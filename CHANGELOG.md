@@ -3,6 +3,14 @@
 One version (`version.txt`) covers the firmware, the DSL, the console and HTTP API, and the IDE. Rules for bumping it
 are in CLAUDE.md ("Versioning"). Newest first; versions before 0.10.0 were not recorded here.
 
+## 0.23.0 (2026-11-12)
+- IDE: programs that read the audio values get an Audio row in the preview: a fake beat at a chosen tempo (40..240
+  bpm, default 120; a kick in the bass on every beat, hats in the top bands between beats), or off (no audio input).
+- Changed: `(env beatms)` before the first beat or without an audio input is 2147483647 (was -1 in 0.21.0 and 0.22.0),
+  so `(lt (env beatms) 100)` stays false instead of flashing all the time.
+- API: `GET /api/status` has `audio` (bands, level, beats, beatms, swing, analysis time per block, overflows), or null
+  without an audio input.
+
 ## 0.22.0 (2026-11-12)
 - New: `audio bench` times the audio analysis on a built-in test signal (fastest, average, slowest per 32 ms block),
   with no audio input or microphone needed.

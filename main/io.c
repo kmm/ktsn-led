@@ -372,9 +372,9 @@ void io_audio_stat(io_audio_stat_t *st)
 
 int32_t io_audio_beatms(void)
 {
-    if (s_audio_slot < 0 || !s_beat_seen) return -1;
+    if (s_audio_slot < 0 || !s_beat_seen) return DSL_BEATMS_NONE;
     uint32_t d = (uint32_t)(esp_timer_get_time() / 1000) - s_beat_at;
-    return d > 0x7FFFFFFF ? 0x7FFFFFFF : (int32_t)d;
+    return d >= DSL_BEATMS_NONE ? DSL_BEATMS_NONE - 1 : (int32_t)d;
 }
 
 static void inputs_task(void *arg)

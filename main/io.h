@@ -76,4 +76,4 @@ typedef struct {
 } io_audio_stat_t;
 void    io_audio_stat(io_audio_stat_t *st);
 void    io_audio_stat_reset(void);
-int32_t io_audio_beatms(void);           /* ms since the latest beat, -1 = no audio input or no beat yet */
+int32_t io_audio_beatms(void);           /* ms since the latest beat, DSL_BEATMS_NONE = no audio input or no beat yet */

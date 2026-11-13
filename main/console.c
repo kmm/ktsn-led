@@ -837,7 +837,7 @@ static void audio_line(cmd_out_t *o, const io_audio_stat_t *st, uint32_t *last_b
     int32_t ago = io_audio_beatms();
     out_printf(o, "bands %s  level %lu%%  beats %lu%s", bands, (unsigned long)((st->level * 100u + AUDIO_ONE / 2) / AUDIO_ONE),
                (unsigned long)st->beats, last_beats && st->beats != *last_beats ? " *" : "  ");
-    if (ago >= 0) out_printf(o, " (%ld ms ago)", (long)ago);
+    if (ago != DSL_BEATMS_NONE) out_printf(o, " (%ld ms ago)", (long)ago);
     out_printf(o, "  swing %u\n", st->swing);
     if (last_beats) *last_beats = st->beats;
 }

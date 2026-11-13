@@ -137,6 +137,25 @@ api_result_t api_status(void)
         cJSON_AddBoolToObject(e, "ok", io_working(i));
         cJSON_AddItemToArray(ios, e);
     }
+    io_audio_stat_t aus;
+    io_audio_stat(&aus);
+    if (aus.slot < 0) cJSON_AddNullToObject(j, "audio");
+    else {
+        cJSON *a = cJSON_AddObjectToObject(j, "audio");
+        cJSON_AddNumberToObject(a, "n", aus.slot);
+        double bands[AUDIO_BANDS];
+        for (int b = 0; b < AUDIO_BANDS; b++) bands[b] = (double)aus.band[b] / AUDIO_ONE;
+        cJSON_AddItemToObject(a, "bands", cJSON_CreateDoubleArray(bands, AUDIO_BANDS));
+        cJSON_AddNumberToObject(a, "level", (double)aus.level / AUDIO_ONE);
+        cJSON_AddNumberToObject(a, "beats", aus.beats);
+        cJSON_AddNumberToObject(a, "beatms", io_audio_beatms());
+        cJSON_AddNumberToObject(a, "swing", aus.swing);
+        cJSON_AddNumberToObject(a, "adc_hz", aus.adc_hz);
+        cJSON_AddNumberToObject(a, "blocks", aus.blocks);
+        cJSON_AddNumberToObject(a, "us_avg", aus.us_avg);
+        cJSON_AddNumberToObject(a, "us_max", aus.us_max);
+        cJSON_AddNumberToObject(a, "overflows", aus.dropped);
+    }
     add_stat(j, "frame_us", &g_perf.frame);
     add_stat(j, "flush_us", &g_perf.flush);
     cJSON_AddNumberToObject(j, "render_stack_free", render_stack_free());

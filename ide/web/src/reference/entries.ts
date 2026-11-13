@@ -666,8 +666,9 @@ export const ENTRIES: Entry[] = [
       'microphone module on an ADC1 pin): band0 .. band7 are decimals 0..1, how loud the sound is from the lowest band ' +
       '(31-62 Hz, the kick drum) to the highest (1.7-4 kHz), each about an octave; level is the overall loudness 0..1. ' +
       'Both follow the volume by themselves (an automatic gain), are updated every 32 ms and fall back within about ' +
-      '0.2 s. beats counts the beats heard (sudden bass), beatms is the ms since the latest one (-1 before the first, ' +
-      'or with no audio input): (lt (env beatms) 100) is true for a moment on every beat. All are 0 (beatms -1) ' +
+      '0.2 s. beats counts the beats heard (sudden bass), beatms is the ms since the latest one (2147483647 before the ' +
+      'first or with no audio input, so it reads as long ago): (lt (env beatms) 100) is true for a moment on every ' +
+      'beat. Bands, level and beats are 0 ' +
       'without an audio input; the console command audio shows them on a board.',
     example: '(fill (buf O) #000000)\n(fill (buf O) #FF0000 0 (env second))    ; a bar growing every second\n\n' +
       '; a dot going round the string once a minute\n(set (buf O) (floor (* (env minfrac) (env npix))) #0000FF)\n\n' +

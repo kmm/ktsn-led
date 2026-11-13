@@ -25,7 +25,7 @@ static const char *TAG = "main";
 channel_t g_channels[CHANNELS_MAX];
 int       g_nchannels;
 globals_t g_globals;
-env_t     g_env = { .intensity = UNIT_ONE, .beatms = -1 };
+env_t     g_env = { .intensity = UNIT_ONE, .beatms = DSL_BEATMS_NONE };
 
 /* Compile and run `src` once, in a temporary channel whose X Y Z O are GLOBAL_BUF_PIXELS long.
  * Meant for setting up the global buffers (palettes etc.); the temporary buffers are thrown away afterwards. */

@@ -16,7 +16,7 @@
 #define GLOBAL_BUF_PIXELS 256
 #define CHANNEL_SCRATCH   2048
 
-static env_t     s_env = { .intensity = UNIT_ONE, .beatms = -1 };
+static env_t     s_env = { .intensity = UNIT_ONE, .beatms = DSL_BEATMS_NONE };
 static globals_t s_globals;
 static channel_t s_ch;
 static bool      s_ready;
@@ -166,6 +166,17 @@ EMSCRIPTEN_KEEPALIVE void lc_set_input(int slot, const char *name, uint32_t valu
 {
     if (slot < 0) slot = wh_io_find(name);
     if (slot >= 0 && slot < 8) s_in_val[slot] = value > 65536 ? 65536 : value;
+}
+
+/* What the audio env values read in the preview (the IDE's fake beat): bands and level 0..65536, beats, beatms
+ * (negative = no beat: DSL_BEATMS_NONE). */
+EMSCRIPTEN_KEEPALIVE void lc_set_audio(int b0, int b1, int b2, int b3, int b4, int b5, int b6, int b7, int level, int beats, int beatms)
+{
+    const int b[DSL_AUDIO_BANDS] = { b0, b1, b2, b3, b4, b5, b6, b7 };
+    for (int i = 0; i < DSL_AUDIO_BANDS; i++) s_env.band[i] = b[i] < 0 ? 0 : b[i] > 65536 ? 65536 : (uint32_t)b[i];
+    s_env.level = level < 0 ? 0 : level > 65536 ? 65536 : (uint32_t)level;
+    s_env.beats = beats < 0 ? 0 : (uint32_t)beats;
+    s_env.beatms = beatms < 0 ? DSL_BEATMS_NONE : beatms;
 }
 
 /* Compile only (no change to what runs). "" if fine, else "line L col C: message". */

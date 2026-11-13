@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BUFFER_NAMES, type BufferName, type CompileError, type Core, DEFAULT_WHITE, type WhiteSettings } from '../core/ktsnLed';
 import { averageSends, envAt, FRAME_HZ, type Location, pixelCss, pixelCssVia, pixelCssWhite, screenTable, skyClock } from '../core/env';
 import { inputsInSource, type PreviewInput } from '../core/inputs';
+import { BPM_DEFAULT, BPM_MAX, BPM_MIN, fakeAudio, usesAudio } from '../core/audio';
 
 interface Props {
   core: Core;
@@ -70,6 +71,10 @@ export function Preview({ core, program, programVersion, onLoad, npixHint, gamma
       core.setInput(/^\d+$/.test(i.key) ? +i.key : i.key, i.kind === 'digital' ? v !== 0 : v);
     }
   }, [core, inputs, inVals, programVersion]);
+  // Audio: programs reading (env band0..beatms) get a fake beat (the board's microphone isn't polled either).
+  const audio = useMemo(() => usesAudio(program ?? ''), [program]);
+  const [beatOn, setBeatOn] = useState(true);
+  const [bpm, setBpm] = useState(BPM_DEFAULT);
   const [simStart, setSimStart] = useState(() => localInputValue(new Date()));
   const [autoexecMsg, setAutoexecMsg] = useState('');
   const [latLon, setLatLon] = useState<[string, string]>(() => {
@@ -81,8 +86,8 @@ export function Preview({ core, program, programVersion, onLoad, npixHint, gamma
 
   // Everything the animation loop reads lives in a ref, so the loop never restarts on a state change.
   const chanInt = chanIntensityHint ?? 1;
-  const live = useRef({ frame: 0, playing, speed, intensity, chanInt, gamma, dither, refresh, white, ledLight, view, clock, simStart, npix, table, location });
-  live.current = { ...live.current, playing, speed, intensity, chanInt, gamma, dither, refresh, white, ledLight, view, clock, simStart, npix, table, location };
+  const live = useRef({ frame: 0, playing, speed, intensity, chanInt, gamma, dither, refresh, white, ledLight, view, clock, simStart, npix, table, location, audio, beatOn, bpm });
+  live.current = { ...live.current, playing, speed, intensity, chanInt, gamma, dither, refresh, white, ledLight, view, clock, simStart, npix, table, location, audio, beatOn, bpm };
   const programRef = useRef(program);
   programRef.current = program;
 
@@ -122,6 +127,7 @@ export function Preview({ core, program, programVersion, onLoad, npixHint, gamma
     L.frame += 1;                                   // like the board: frame counts up before each render
     const when = L.clock === 'real' ? new Date() : new Date(+new Date(L.simStart) + (L.frame * 1000) / FRAME_HZ);
     const s = sky(when, L.location);
+    core.setAudio(L.audio && L.beatOn ? fakeAudio((L.frame * 1000) / FRAME_HZ, L.bpm) : null);   // preview time: follows speed and steps
     const nodes = core.render(envAt(L.frame, when, L.intensity, s));
     setStats({ frame: L.frame, nodes, faults: core.faults(), lastError: core.lastError(), scratch: core.scratchHigh(),
                time: when.toLocaleTimeString(),
@@ -263,6 +269,16 @@ export function Preview({ core, program, programVersion, onLoad, npixHint, gamma
                 onChange={(e) => setInVals({ ...inVals, [i.key]: e.target.checked ? 1 : 0 })} /> {i.label}</label>
             : <label key={i.key} title={`(analog ${i.key})`}>{i.label} <input type="range" min={0} max={1} step={0.01} value={inVals[i.key] ?? 0}
                 onChange={(e) => setInVals({ ...inVals, [i.key]: +e.target.value })} /> <span className="num">{(inVals[i.key] ?? 0).toFixed(2)}</span></label>)}
+        </div>
+      )}
+      {audio && (
+        <div className="controls preview-inputs">
+          <span className="muted" title="Stand-in for a board's audio input: (env band0) .. (env band7), level, beats, beatms">Audio</span>
+          <label className="check" title="A kick on every beat (bass), hats between beats (top bands); off = no audio input (all 0, beatms 2147483647)">
+            <input type="checkbox" checked={beatOn} onChange={(e) => setBeatOn(e.target.checked)} /> fake beat</label>
+          <label title="Beats per minute">
+            <input type="number" min={BPM_MIN} max={BPM_MAX} value={bpm} disabled={!beatOn}
+              onChange={(e) => { const v = Math.round(+e.target.value); if (v >= BPM_MIN && v <= BPM_MAX) setBpm(v); }} /> bpm</label>
         </div>
       )}
       <dl className="stats">

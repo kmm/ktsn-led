@@ -26,6 +26,10 @@ export interface BoardStatus {
   /** GPIO slots now (configured ones): value 0..1 (binary and digital inputs: 0 or 1; analog: the latest 16 ms
    *  averaged), ok = set up without errors; mode missing on firmware from before inputs. */
   io?: { n: number; name: string; mode?: BoardIo['mode']; value: number; ok: boolean }[];
+  /** The audio input's analysis (null: none; missing on firmware from before 0.23.0): bands/level 0..1, beatms 2147483647 =
+   *  no beat yet, swing in ADC counts, analysis time per 32 ms block. */
+  audio?: { n: number; bands: number[]; level: number; beats: number; beatms: number; swing: number; adc_hz: number;
+            blocks: number; us_avg: number; us_max: number; overflows: number } | null;
   heap_free: number;
 }
 

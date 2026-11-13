@@ -22,7 +22,7 @@
 static int g_fail, g_checks;
 #define CHECK(c) do { g_checks++; if (!(c)) { g_fail++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
 
-static env_t env = { .intensity = 256, .beatms = -1 };
+static env_t env = { .intensity = 256, .beatms = DSL_BEATMS_NONE };
 static globals_t globals;
 
 static void with_channel(void (*fn)(channel_t *))
@@ -1296,8 +1296,8 @@ static void t_env_time(channel_t *ch)
           && ch->buf[BUF_O][4] == 0xFF0000 && ch->buf[BUF_O][5] == 0);
     CHECK(channel_set_source(ch, "(fill (buf O) #FF0000 0 (env band1))", e, sizeof e) != 0);   /* a decimal: no index */
     CHECK(channel_set_source(ch, "(def x (env band8))", e, sizeof e) != 0 && strstr(e, "did you mean band"));
-    env = (env_t){ .intensity = 256, .beatms = -1 };
-    CHECK(dsl_true(ch, "(and (eq (env beatms) -1) (eq (env beats) 0) (eq (env level) 0))"));
+    env = (env_t){ .intensity = 256, .beatms = DSL_BEATMS_NONE };                /* no beat: "within 100 ms" is false */
+    CHECK(dsl_true(ch, "(and (eq (env beatms) 2147483647) (not (lt (env beatms) 100)) (eq (env beats) 0) (eq (env level) 0))"));
     /* Fractions scale a length directly; whole-number names stay ints for ranges. */
     env = (env_t){ .hour = 12, .intensity = 256 };
     CHECK(run(ch, "(fill (buf O) #000000) (fill (buf O) #FF0000 0 (round (* (env dayfrac) (env npix))))", e) == 0);

@@ -44,6 +44,7 @@ typedef struct {
 
 /* ---- environment (written by the system, read by programs) ---- */
 #define DSL_AUDIO_BANDS 8
+#define DSL_BEATMS_NONE 2147483647   /* beatms before any beat: so "(lt (env beatms) 100)" is false */
 typedef struct {
     uint32_t frame;
     uint16_t year;
@@ -61,7 +62,7 @@ typedef struct {
     uint32_t band[DSL_AUDIO_BANDS];  /* audio input: energy per band, low to high, 0..65536 (= 1.0); 0 without one */
     uint32_t level;              /* audio input: overall, 0..65536 */
     uint32_t beats;              /* audio input: beats heard since it was set up */
-    int32_t  beatms;             /* ms since the latest beat; -1 = no audio input or no beat yet */
+    int32_t  beatms;             /* ms since the latest beat; DSL_BEATMS_NONE = no audio input or no beat yet */
 } env_t;
 
 /* ---- perf stats ---- */

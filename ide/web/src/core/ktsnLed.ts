@@ -1,6 +1,7 @@
 // Typed wrapper around the DSL core compiled to WebAssembly (ide/wasm). Same compiler and runtime as the boards, so
 // compile errors and rendered pixels match a device exactly. No DOM or React here: usable from Electron or tests.
 import createModule from '../wasm/generated/ktsn-led.mjs';
+import type { AudioEnv } from './audio';
 
 export const BUFFER_NAMES = ['X', 'Y', 'Z', 'O', 'G0', 'G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7'] as const;
 export type BufferName = (typeof BUFFER_NAMES)[number];
@@ -61,6 +62,8 @@ export interface Core {
   setOutputs(outputs: { n: number; name: string; mode?: string }[] | null): void;
   /** What an input reads in the preview, by slot number or name: a digital input true/false, an analog one 0..1. */
   setInput(slot: number | string, value: boolean | number): void;
+  /** What (env band0..band7 / level / beats / beatms) read in the preview; null = no audio input (0, beatms 2147483647). */
+  setAudio(a: AudioEnv | null): void;
   /** Compile and run it from the next frame; on error the old program keeps running. */
   load(src: string): CompileError | null;
   /** Run once in a temporary channel, like a board's autoexec. Returns an error/fault message or "". */
@@ -104,6 +107,7 @@ export function loadCore(): Promise<Core> {
     let libNames: string[] | null = null;
     const setIo = fn('lc_set_io', null, ['string']);
     const setIn = fn('lc_set_input', null, ['number', 'string', 'number']);
+    const setAud = fn('lc_set_audio', null, Array(11).fill('number'));
     const useClear = fn('lc_use_clear', null, []);
     const useAdd = fn('lc_use_add', null, ['string', 'string', 'string']);
     let uses: UseSources = new Map();
@@ -158,6 +162,11 @@ export function loadCore(): Promise<Core> {
       setInput(slot, value) {
         const v = typeof value === 'boolean' ? (value ? 1 : 0) : Math.round(Math.min(1, Math.max(0, value)) * 65536);
         setIn(typeof slot === 'number' ? slot : -1, typeof slot === 'string' ? slot : '', v);
+      },
+      setAudio(a) {
+        const q = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 65536);
+        if (!a) setAud(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1);
+        else setAud(...a.band.slice(0, 8).map(q), q(a.level), Math.max(0, Math.floor(a.beats)), Math.floor(a.beatms));
       },
       load: (src) => parseError(load(src)),
       autoexec: (src) => autoexec(src),

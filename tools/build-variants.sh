@@ -36,7 +36,7 @@ echo "$VARIANTS" | while IFS='|' read -r name dir target presets; do
     # The root variant keeps the usual build/ + ./sdkconfig, so plain `idf.py build` stays the same build.
     if [ "$dir" = build ]; then cfg=sdkconfig; else cfg="$dir/sdkconfig"; fi
     # idf.py refuses a build folder configured with a different interpreter path (python vs python3): reuse its own.
-    py=$(sed -n 's/^PYTHON:[A-Z]*=//p' "$dir/CMakeCache.txt" 2>/dev/null)
+    py=$(sed -n 's/^PYTHON:[A-Z]*=//p' "$dir/CMakeCache.txt" 2>/dev/null || true)   # none yet in a fresh clone
     [ -n "$py" ] || py=$(command -v python || command -v python3)
     run=$(echo "$IDF" | sed "s|^@py|$py|")
     $run -B "$dir" -D SDKCONFIG="$cfg" -D IDF_TARGET="$target" -D SDKCONFIG_DEFAULTS="$defaults" build || exit 1

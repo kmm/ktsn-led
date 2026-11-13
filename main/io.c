@@ -364,7 +364,10 @@ void io_audio_stat(io_audio_stat_t *st)
     st->dropped = s_ovf - s_ovf0;
     st->us_avg = s_blocks ? s_us_sum / s_blocks : 0;
     st->us_max = s_us_max;
-    st->a = s_audio;                                   /* may tear while a block is analysed: fine for a display */
+    for (int b = 0; b < AUDIO_BANDS; b++) st->band[b] = s_audio.band[b];   /* may tear mid-block: fine for a display */
+    st->level = s_audio.level;
+    st->beats = s_audio.beats;
+    st->swing = s_audio.swing;
 }
 
 int32_t io_audio_beatms(void)

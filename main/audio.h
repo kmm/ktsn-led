@@ -29,6 +29,7 @@ typedef struct {
     int32_t  hist[AUDIO_HIST];           /* bass log2 power, Q8 */
     uint8_t  hist_at, hist_n;
     bool     started;
+    int16_t  re[AUDIO_N], im[AUDIO_N];   /* FFT work space (each analysis has its own: the bench runs beside the input) */
 } audio_t;
 
 void audio_init(audio_t *a);

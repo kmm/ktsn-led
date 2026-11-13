@@ -829,29 +829,68 @@ static void audio_line(cmd_out_t *o, const io_audio_stat_t *st, uint32_t *last_b
 {
     char bands[AUDIO_BANDS * 2 + 1];
     for (int b = 0; b < AUDIO_BANDS; b++) {
-        uint32_t v = (st->a.band[b] * 9u + AUDIO_ONE / 2) / AUDIO_ONE;
+        uint32_t v = (st->band[b] * 9u + AUDIO_ONE / 2) / AUDIO_ONE;
         bands[b * 2] = (char)('0' + (v > 9 ? 9 : v));
         bands[b * 2 + 1] = ' ';
     }
     bands[AUDIO_BANDS * 2 - 1] = 0;
     int32_t ago = io_audio_beatms();
-    out_printf(o, "bands %s  level %lu%%  beats %lu%s", bands, (unsigned long)((st->a.level * 100u + AUDIO_ONE / 2) / AUDIO_ONE),
-               (unsigned long)st->a.beats, last_beats && st->a.beats != *last_beats ? " *" : "  ");
+    out_printf(o, "bands %s  level %lu%%  beats %lu%s", bands, (unsigned long)((st->level * 100u + AUDIO_ONE / 2) / AUDIO_ONE),
+               (unsigned long)st->beats, last_beats && st->beats != *last_beats ? " *" : "  ");
     if (ago >= 0) out_printf(o, " (%ld ms ago)", (long)ago);
-    out_printf(o, "  swing %u\n", st->a.swing);
-    if (last_beats) *last_beats = st->a.beats;
+    out_printf(o, "  swing %u\n", st->swing);
+    if (last_beats) *last_beats = st->beats;
+}
+
+/* audio bench: the full analysis on a made-up signal (kicks, a tone, noise), timed. Needs no audio input, so the cost
+ * can be measured on any board; runs in this task with its own state, beside a real input if there is one. */
+static int audio_bench(cmd_out_t *o)
+{
+    enum { BLOCKS = 200 };
+    audio_t *a = malloc(sizeof *a);
+    uint16_t *s = malloc(AUDIO_N * sizeof *s);
+    if (!a || !s) { free(a); free(s); out_puts(o, "out of memory"); return 1; }
+    audio_init(a);
+    uint32_t rng = 1, lo = UINT32_MAX, hi = 0;
+    uint64_t sum = 0;
+    for (int b = 0; b < BLOCKS; b++) {
+        for (int n = 0; n < AUDIO_N; n++) {
+            uint32_t t = (uint32_t)(b * AUDIO_N + n);
+            int32_t v = (t % 8 < 4 ? 120 : -120);                          /* 1 kHz square */
+            uint32_t tb = t % 4000;                                        /* a kick every 500 ms: 62.5 Hz, 80 ms */
+            if (tb < 640) v += ((tb / 64) % 2 ? -1 : 1) * (int32_t)(640 - tb) * 600 / 640;
+            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+            v += (int32_t)(rng % 61) - 30;
+            s[n] = (uint16_t)(2048 + v);
+        }
+        int64_t t0 = esp_timer_get_time();
+        audio_block(a, s, (uint32_t)b * AUDIO_HOP_MS);
+        uint32_t us = (uint32_t)(esp_timer_get_time() - t0);
+        sum += us;
+        if (us < lo) lo = us;
+        if (us > hi) hi = us;
+    }
+    uint32_t avg = (uint32_t)(sum / BLOCKS), beats = a->beats;
+    free(a); free(s);
+    out_printf(o, "%d blocks: %lu us fastest, %lu us average, %lu us slowest per %d ms block (%lu.%02lu%% of the time at the average)\n",
+               BLOCKS, (unsigned long)lo, (unsigned long)avg, (unsigned long)hi, AUDIO_HOP_MS,
+               (unsigned long)(avg / (AUDIO_HOP_MS * 10)), (unsigned long)(avg * 10 / AUDIO_HOP_MS % 100));
+    out_printf(o, "test signal: a kick every 500 ms for 6.4 s, %lu beats found (11 expected: the first second fills the history)\n",
+               (unsigned long)beats);
+    return 0;
 }
 
 static int cmd_audio(cmd_out_t *o, int argc, char **argv)
 {
+    if (argc >= 2 && !strcmp(argv[1], "bench")) return audio_bench(o);
     io_audio_stat_t st;
     io_audio_stat(&st);
-    if (st.slot < 0) { out_puts(o, "no audio input (io config <n> <gpio> audio [name=x])"); return 1; }
+    if (st.slot < 0) { out_puts(o, "no audio input (io config <n> <gpio> audio [name=x]); audio bench works without one"); return 1; }
     if (argc >= 2 && !strcmp(argv[1], "reset")) { io_audio_stat_reset(); out_puts(o, "timing and drop counts reset"); return 0; }
     if (argc >= 2 && !strcmp(argv[1], "watch")) {
         long secs = argc >= 3 ? strtol(argv[2], NULL, 10) : 10;
         if (secs < 1 || secs > 600) { out_puts(o, "usage: audio watch [1..600 s]"); return 1; }
-        uint32_t last = st.a.beats;
+        uint32_t last = st.beats;
         cmd_unlock();                                  /* don't hold up the API and automation while watching */
         for (long k = 0; k < secs * 4; k++) {
             vTaskDelay(pdMS_TO_TICKS(250));
@@ -862,7 +901,7 @@ static int cmd_audio(cmd_out_t *o, int argc, char **argv)
         cmd_lock();
         return 0;
     }
-    if (argc >= 2) { out_puts(o, "usage: audio [watch [s] | reset]"); return 1; }
+    if (argc >= 2) { out_puts(o, "usage: audio [watch [s] | reset | bench]"); return 1; }
     const io_cfg_t *c = &g_set.io[st.slot];
     out_printf(o, "audio input %d%s%s on gpio %d: %d Hz, each sample the average of %lu conversions (adc %lu Hz in all)\n",
                st.slot, c->name[0] ? " " : "", c->name, c->gpio, AUDIO_RATE, (unsigned long)st.per_sample, (unsigned long)st.adc_hz);
@@ -976,7 +1015,7 @@ const cmd_def_t g_cmds[] = {
     { "hostname", "Network name (DHCP, <name>.local): hostname | hostname <name>", cmd_hostname },
 #endif
     { "tz",       "Time zone: tz | tz <POSIX TZ>, e.g. tz PST8PDT,M3.2.0,M11.1.0", cmd_tz },
-    { "audio",    "Audio input analysis: audio | audio watch [s] | audio reset  (bands, level, beats, time per block)", cmd_audio },
+    { "audio",    "Audio input analysis: audio | audio watch [s] | audio reset | audio bench  (bands, level, beats, time per block; bench: time the analysis on a test signal)", cmd_audio },
     { "loc",      "Location for sunrise and sunset: loc | loc <lat> <lon> | loc off  (degrees, north and east positive)", cmd_loc },
     { "save",     "Save programs, autoexec, automation, channels, outputs, gamma, dither, white, output, intensity, tz, loc (and wifi, ntp, token, hostname) to flash", cmd_save },
     { "config",   "Show what is saved in flash, or: config erase", cmd_config },

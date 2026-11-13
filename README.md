@@ -118,6 +118,7 @@ debounced) or `(analog knob)` (0..1, averaged). The C6 build starts with GPIO 19
                                             level, beats, beatms
     audio                    the audio analysis: sample rate, time per block, bands, level, beats, swing
     audio watch 20           print bands, level and beats 4 times a second for 20 s (`audio reset` clears timings)
+    audio bench              time the analysis on a built-in test signal (no audio input needed)
     io config 2 off          remove it (its pin is let go)
 
 A segment display wired as one LED strip: `seg7`, `seg9` and `seg14` draw a number or text as a mask (lit segments

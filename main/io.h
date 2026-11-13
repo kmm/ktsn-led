@@ -70,8 +70,9 @@ typedef struct {
     int      slot;                       /* -1 = no audio input */
     uint32_t adc_hz, per_sample;         /* conversions per second on the ADC (all inputs), averaged into each sample */
     uint32_t blocks, dropped;            /* blocks analysed, ADC overflows (samples lost) since the last reset */
-    uint32_t us_avg, us_max;             /* analysis time per block */
-    audio_t  a;                          /* copy of the analysis state */
+    uint32_t us_avg, us_max;             /* analysis time per block (wall time: includes being interrupted) */
+    uint32_t band[AUDIO_BANDS], level, beats;   /* the latest results */
+    uint16_t swing;
 } io_audio_stat_t;
 void    io_audio_stat(io_audio_stat_t *st);
 void    io_audio_stat_reset(void);

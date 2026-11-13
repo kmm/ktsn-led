@@ -323,7 +323,7 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   and calls `audio_block` itself, timing it (`io_audio_stat`), and writes g_env band/level/beats; render.c's env_tick
   sets `beatms` from `io_audio_beatms` every frame. ADC store buffer sized for ~40 ms, overflows counted (`on_pool_ovf`).
   DSL: env names band0..band7, level (decimals, `env_is_fix`), beats, beatms (-1 = none); `(in mic)`, `(analog mic)`,
-  `(io mic)` refuse an audio slot. Console `audio [watch [s] | reset]`. **Not done yet** (after the CPU measurement):
+  `(io mic)` refuse an audio slot. Console `audio [watch [s] | reset | bench]`. **Not done yet** (after the CPU measurement):
   the IDE preview's fake beat (values are 0 / -1 there), API status fields for the analysis.
 - **Strings** (2026-10-31; plan agreed 2026-10-30): `V_STR` / `A_STR`, value `strref_t {p, len}`, a view (not
   NUL-terminated; `str-sub` returns part of another string without copying). Literals `"..."` (one line, at most
@@ -617,11 +617,11 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
     (env beats) (env beatms)                   beats heard; ms since the latest (-1 none)
 `_` = use the default for an optional argument, e.g. `(slice (buf O) _ _ -1)` reverses O.
 Console: `version` (what runs, slot, unconfirmed update?, other slot), `prog <ch> <source>` (or `prog <ch>` alone: several lines, end with `.`), `list`, `env [intensity N | time YYYY-MM-DD HH:MM:SS]`, `buf <ch> <id> [start] [count]`, `stat [reset]`,
-`autoexec [run | clear | paste | <source>]`, `lib [show|rm <name> | set <name> [source] | save|run <name> <ch>]`, `intensity [<ch|all> <0..1> [fade s]]`, `automation [<source> | paste | clear | run | every <s>]`, `chan [<n> <gpio> <npix> [wire] | <n> off]`, `gamma [<ch> <1.0..3.0 | off>]`, `dither [<ch> <0..4>]`, `white [<ch> max <0..100> | <ch> mode <direct|extract|boost> | <ch> point <#RRGGBB> [ratio]]`, `output [refresh <1..4> | parallel <on|off>]`, `io [<n|name> <on|off|0..1> | config <n> <gpio> <binary|pwm|input|analog|audio> [options] | config <n> off]`, `audio [watch [s] | reset]`, `wifi [<ssid> [pass] | off]`, `ntp [server]`,
+`autoexec [run | clear | paste | <source>]`, `lib [show|rm <name> | set <name> [source] | save|run <name> <ch>]`, `intensity [<ch|all> <0..1> [fade s]]`, `automation [<source> | paste | clear | run | every <s>]`, `chan [<n> <gpio> <npix> [wire] | <n> off]`, `gamma [<ch> <1.0..3.0 | off>]`, `dither [<ch> <0..4>]`, `white [<ch> max <0..100> | <ch> mode <direct|extract|boost> | <ch> point <#RRGGBB> [ratio]]`, `output [refresh <1..4> | parallel <on|off>]`, `io [<n|name> <on|off|0..1> | config <n> <gpio> <binary|pwm|input|analog|audio> [options] | config <n> off]`, `audio [watch [s] | reset | bench]`, `wifi [<ssid> [pass] | off]`, `ntp [server]`,
 `tz [POSIX TZ]`, `loc [<lat> <lon> | off]`, `save`, `config [erase]`, `reboot`.
 
 ## Status / known unverified parts
-Host tests: 6059 checks, 0 failures (macOS clang and gcc). **Builds cleanly with ESP-IDF v6.1 for esp32, flashed and running; RGB color order confirmed on the WS2811 string.**
+Host tests: 6060 checks, 0 failures (macOS clang and gcc). **Builds cleanly with ESP-IDF v6.1 for esp32, flashed and running; RGB color order confirmed on the WS2811 string.**
 - Toolchain: `source ~/.espressif/tools/activate_idf_v6.1.sh` (EIM install).
 - `led_strip` is pinned to `^3.0.0` (3.x uses `color_component_format`; 2.x used `led_pixel_format`). Color order is the per-channel wire format (it was `LED_COLOR_FORMAT` in `config.h` until 2026-10-18).
 - `main` requires `esp_driver_rmt` (not the legacy `driver` component).
@@ -690,10 +690,15 @@ Host tests: 6059 checks, 0 failures (macOS clang and gcc). **Builds cleanly with
   survives reboot, a program using `(env sunset)`/`(env sunrise)` switches correctly with the time zone. One
   calculation takes ~18 ms on the ESP32 (once a minute, in the low-priority automation task, so no frame cost).
   Not run on hardware: the API `loc` field (`tools/apitest.py` check only syntax-checked).
-- Audio input (0.21.0 prototype, 2026-11-12): host-tested (`t_audio`, audio env values and kind errors in `t_env_time`
-  / `t_inputs`), builds for every variant. **Not run on hardware**: the analysis time per block on both chips
-  (`audio` shows it; the point of the prototype), ADC at 16 kHz (C6) / 24 kHz (ESP32), a real microphone, beats in
-  real music.
+- Audio input (0.21.0 prototype, 0.22.0 bench, 2026-11-12): host-tested (`t_audio`, audio env values and kind errors in `t_env_time`
+  / `t_inputs`), builds for every variant. First measurement by the user (0.21.0, no mic, floating pins, 2026-11-12):
+  C6 803 us average per block (2.5% CPU; max 3.1 ms = wall time incl. being preempted on the single core), 16 kHz ADC,
+  0 overflows; the floating pin's noise (swing 19) passed the gate (6) and gave 42 beats, so the gate needs tuning
+  with a real mic. ESP32: pin read 0 (swing 0), so only the silence path ran (48 us): no FFT measured. Hence 0.22.0:
+  `audio.c` at -O2 (main is -Og) and `audio bench` (console.c `audio_bench`: 200 blocks of an integer test signal,
+  kicks every 500 ms, own heap audio_t; FFT work buffers moved into audio_t so it can run beside the live input;
+  host test checks the same signal gives 11 beats). **Not run on hardware**: 0.22.0, a real microphone, beats in real
+  music.
 - GPIO inputs (0.20.0, 2026-11-12): host-tested (`t_inputs`: names, kinds, samples, clamping, mode changed after
   compiling, hosts without modes, automation reading inputs), IDE tests (core: offline names, board kinds; preview
   input discovery), builds for every variant (ESP32 2 MB WiFi image 27% free after the ADC driver). **Verified by the

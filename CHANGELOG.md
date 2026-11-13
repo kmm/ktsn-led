@@ -3,6 +3,11 @@
 One version (`version.txt`) covers the firmware, the DSL, the console and HTTP API, and the IDE. Rules for bumping it
 are in CLAUDE.md ("Versioning"). Newest first; versions before 0.10.0 were not recorded here.
 
+## 0.22.0 (2026-11-12)
+- New: `audio bench` times the audio analysis on a built-in test signal (fastest, average, slowest per 32 ms block),
+  with no audio input or microphone needed.
+- Faster: the audio analysis is compiled with -O2.
+
 ## 0.21.0 (2026-11-12)
 - New (experimental, a prototype to measure on hardware): an audio input. `io config <n> <gpio> audio` on an ADC1 pin
   (one at most) with an analog microphone module. The board samples it at 8 kHz and every 32 ms runs a 256-point

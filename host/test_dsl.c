@@ -2591,6 +2591,28 @@ static void t_audio(void)
         CHECK(a.beats - b0 >= 17 && a.beats - b0 <= 21);
     }
 
+    /* the console's `audio bench` signal (integer, as on the board): 11 beats after the first second */
+    {
+        static audio_t a;
+        audio_init(&a);
+        uint16_t sb[AUDIO_N];
+        uint32_t rng = 1;
+        for (int b = 0; b < 200; b++) {
+            for (int n = 0; n < AUDIO_N; n++) {
+                uint32_t t = (uint32_t)(b * AUDIO_N + n);
+                int32_t v = (t % 8 < 4 ? 120 : -120);
+                uint32_t tb = t % 4000;
+                if (tb < 640) v += ((tb / 64) % 2 ? -1 : 1) * (int32_t)(640 - tb) * 600 / 640;
+                rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+                v += (int32_t)(rng % 61) - 30;
+                sb[n] = (uint16_t)(2048 + v);
+            }
+            audio_block(&a, sb, (uint32_t)b * AUDIO_HOP_MS);
+        }
+        if (a.beats != 11) printf("audio: bench signal %u beats\n", a.beats);
+        CHECK(a.beats == 11);
+    }
+
     /* steady noise and a steady tone: (almost) no beats */
     {
         audio_t a; audio_init(&a);

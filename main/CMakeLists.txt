@@ -31,3 +31,6 @@ idf_component_register(SRCS ${srcs}
 
 # The serial REPL's raw line, for program source with "strings" (cmd.c: __wrap_esp_console_split_argv)
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_console_split_argv")
+
+# The audio analysis runs an FFT every 32 ms: -O2 like the DSL core (the rest of main stays at the project's -Og)
+set_source_files_properties(audio.c PROPERTIES COMPILE_OPTIONS "-O2")

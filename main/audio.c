@@ -102,7 +102,7 @@ static uint32_t release(uint32_t old, uint32_t now) { return now >= old ? now : 
 
 void audio_block(audio_t *a, const uint16_t *s, uint32_t now_ms)
 {
-    static int16_t re[AUDIO_N], im[AUDIO_N];     /* 1 KB; one caller (the inputs task, or a test) */
+    int16_t *re = a->re, *im = a->im;
     int32_t sum = 0;
     for (int n = 0; n < AUDIO_N; n++) sum += s[n] > 4095 ? 4095 : s[n];
     int32_t mean = (sum + AUDIO_N / 2) / AUDIO_N;

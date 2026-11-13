@@ -301,7 +301,9 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   `io_mode`, `in_get`, `analog_get`, values 0..65536 = Q16); `bind_slot` resolves names and, when the host knows the
   mode (`io_mode` >= 0), checks the kind (io/io-set refuse inputs, in refuses analog, ...); at run time a slot whose
   mode changed since compiling is a fault. Analog invert = 1 - v. Console `io config <n> <gpio> input|analog ...`,
-  JSON config `io[].pull/debounce/trigger`, status `io[].mode`. WASM: board slots with modes (`lc_set_io` "n:name:mode"),
+  JSON config `io[].pull/debounce/trigger`, status `io[].mode`. The IDE offers modes by firmware version
+  (`boardIoModes` in devices/types.ts: inputs >= 0.20.0, audio >= 0.21.0; slots showing a mode count too): guessing
+  from configured slots (0.20.0..0.23.0) offered only outputs on a board with no slots (found by the user). WASM: board slots with modes (`lc_set_io` "n:name:mode"),
   offline each new name gets the next slot and modes are unknown (no kind checks); `lc_set_input(slot|name, v)`. IDE:
   Board panel "Inputs and outputs" (`ui/OutputsSection.tsx`), preview Inputs controls (`core/inputs.ts`: the board's
   input slots, offline the names the program reads), reference category Inputs.
@@ -705,7 +707,8 @@ Host tests: 6060 checks, 0 failures (macOS clang and gcc). **Builds cleanly with
   fastest / 600 average / 2198 slowest (1.87%), ESP32 485 / 504 / 1540 (1.57%), 11 beats on both: **it fits**, so
   phase 3 continues (agreed rule: stop if it doesn't). 0.23.0 (preview fake beat, API status `audio`, beatms none = 2147483647): IDE tests,
   checked by Claude in the dev-server preview (bass bar jumps every 500 ms at 120 bpm, flash on each beat; fake beat
-  off = dark), builds for every variant. **Not run on hardware**: a real microphone, beats in real music, the API `audio` field.
+  off = dark), builds for every variant. **0.23.0 flashed and confirmed working by the user on the C6 and the ESP32**
+  (2026-11-13; no microphone yet). **Not run on hardware**: a real microphone, beats in real music, the API `audio` field.
 - GPIO inputs (0.20.0, 2026-11-12): host-tested (`t_inputs`: names, kinds, samples, clamping, mode changed after
   compiling, hosts without modes, automation reading inputs), IDE tests (core: offline names, board kinds; preview
   input discovery), builds for every variant (ESP32 2 MB WiFi image 27% free after the ADC driver). **Verified by the

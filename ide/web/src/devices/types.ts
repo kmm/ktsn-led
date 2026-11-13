@@ -41,6 +41,23 @@ export interface BoardIo {
 }
 export const isOutputMode = (m: BoardIo['mode']) => m === 'binary' || m === 'pwm';
 
+/** Whether a firmware version ("MAJOR.MINOR.PATCH", maybe with a suffix) is at least `min`; false if unreadable. */
+export function versionAtLeast(version: string | undefined, min: string): boolean {
+  const parse = (v: string) => /^(\d+)\.(\d+)\.(\d+)/.exec(v)?.slice(1).map(Number);
+  const a = version ? parse(version) : undefined, b = parse(min);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
+  return true;
+}
+
+/** The io modes a board offers: inputs came in 0.20.0, audio in 0.21.0. The firmware version decides; slots already
+ *  using a mode (or reporting input fields) count too, for boards whose status has no version. */
+export function boardIoModes(version: string | undefined, slots: { mode?: string; pull?: unknown }[]): BoardIo['mode'][] {
+  const inputs = versionAtLeast(version, '0.20.0') || slots.some((s) => s.pull !== undefined || (s.mode !== undefined && !isOutputMode(s.mode as BoardIo['mode'])));
+  const audio = versionAtLeast(version, '0.21.0') || slots.some((s) => s.mode === 'audio');
+  return ['binary', 'pwm', ...(inputs ? ['input', 'analog'] as const : []), ...(audio ? ['audio'] as const : [])];
+}
+
 /** `wire`: bytes per pixel on the wire ("RGB", "GRB", "GRBW", "BRG WWW"; layout, applies after save + reboot);
  *  `gamma`: 1.0..3.0, 1 = off; `dither`: bits 0..4, 0 = off; `wmax`: white limit, percent (W spread over several W
  *  outputs when the wire has more than one). Missing on firmware from before them. */

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { type BoardConfig, type BoardIo, type BoardStatus, isOutputMode, type Transport } from '../devices/types';
+import { type BoardConfig, type BoardIo, type BoardStatus, boardIoModes, type Transport } from '../devices/types';
 
 interface Props {
   t: Transport;
@@ -30,13 +30,13 @@ export function OutputsSection({ t, config, status, act, refresh, pollNow }: Pro
   const [level, setLevel] = useState<Record<number, number>>({});
   const [add, setAdd] = useState({ gpio: '', mode: 'binary' as BoardIo['mode'] });
   const free = Array.from({ length: max }, (_, i) => i).find((i) => !ios.some((o) => o.n === i));
-  const inputs = !!status?.io?.some((s) => s.mode !== undefined) || ios.some((o) => o.pull !== undefined);   // firmware with inputs
 
   const cfg = (o: BoardIo, label: string, change: Partial<Omit<BoardIo, 'n'>>) =>
     act(`slot ${o.n} ${label}`, async () => { await t.patch({ io: { [o.n]: change } }); await refresh(); pollNow(); });
   const set = (o: BoardIo, v: boolean | number) =>
     act(`output ${o.name || o.n}`, async () => { await t.patch({ io_set: { [o.n]: v } }); pollNow(); });
-  const modes = MODES.filter((m) => inputs || isOutputMode(m.mode));
+  const offered = boardIoModes(status?.firmware?.version, [...ios, ...(status?.io ?? [])]);   // by firmware version
+  const modes = MODES.filter((m) => offered.includes(m.mode));
 
   return (
     <>

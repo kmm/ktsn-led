@@ -3,6 +3,10 @@
 One version (`version.txt`) covers the firmware, the DSL, the console and HTTP API, and the IDE. Rules for bumping it
 are in CLAUDE.md ("Versioning"). Newest first; versions before 0.10.0 were not recorded here.
 
+## 0.23.1 (2026-11-13)
+- Fixed (IDE): adding a GPIO slot on a board with none set up offered only binary and pwm; the Board panel now offers
+  the modes the board's firmware has (input and analog from 0.20.0, audio from 0.21.0). IDE only: no need to flash.
+
 ## 0.23.0 (2026-11-12)
 - IDE: programs that read the audio values get an Audio row in the preview: a fake beat at a chosen tempo (40..240
   bpm, default 120; a kick in the bass on every beat, hats in the top bands between beats), or off (no audio input).

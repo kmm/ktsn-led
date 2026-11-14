@@ -206,6 +206,23 @@ export function BoardPanel({ conn, deviceName, visible, onOpenProgram, onOpenAut
           <dt>time</dt><dd>{status.time.replace('T', ' ')} <span className="muted">{status.tz}</span></dd>
           {config.loc !== undefined && <><dt>location</dt><dd>{config.loc ? `${config.loc.lat}, ${config.loc.lon}` : <span className="muted">not set (console: loc &lt;lat&gt; &lt;lon&gt;)</span>}</dd></>}
           <dt>wifi</dt><dd>{status.wifi ? (status.wifi.connected ? `${status.wifi.ssid} ${status.wifi.ip} (${status.wifi.rssi} dBm)` : `not connected (${status.wifi.ssid || 'off'})`) : 'not in this build'}</dd>
+          {config.antenna !== undefined && <><dt>antenna</dt><dd>
+            <select value={config.antenna} title="XIAO ESP32-C6 RF switch: the built-in ceramic antenna or one on the U.FL connector (applies at once; save to keep it)"
+              onChange={(e) => { const a = e.target.value as 'internal' | 'external'; void act('antenna', async () => { await t.patch({ antenna: a }); await conn.refreshConfig(); }); }}>
+              <option value="internal">built-in (ceramic)</option>
+              <option value="external">external (U.FL)</option>
+            </select></dd></>}
+          {status.audio && config.audio_gate !== undefined && <><dt>audio</dt><dd>
+            <span title="The microphone's average loudness in the latest 32 ms (ADC counts); blocks below the gate count as silence">rms {status.audio.rms ?? '?'}</span>
+            {' '}<label title="Noise gate (rms in ADC counts, 0 = off): room noise below it stays dark. Applies at once; save to keep it">gate
+              <input className="gamma" type="number" min={0} max={2000} defaultValue={config.audio_gate} key={config.audio_gate}
+                onBlur={(e) => { const v = Math.round(+e.target.value); if (v >= 0 && v <= 2000 && v !== config.audio_gate) void act('audio gate', async () => { await t.patch({ audio_gate: v }); await conn.refreshConfig(); }); }} /></label>
+            {' '}<button title="Listen to the quiet room for 5 s and set the gate a little above its noise (keep it quiet)"
+              onClick={() => act('audio gate learn', async () => {
+                const r = await t.cmd('audio gate learn 5');
+                for (const l of r.output.replace(/\n$/, '').split('\n')) conn.addLog(l);
+                await conn.refreshConfig();
+              })}>Learn (5 s of quiet)</button></dd></>}
           <dt>heap</dt><dd>{Math.round(status.heap_free / 1024)} KB free</dd>
           {status.channels.map((c, i) => (
             <Fragment key={i}><dt>ch{i}</dt>

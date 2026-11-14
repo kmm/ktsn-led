@@ -32,6 +32,15 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   Default LED GPIO is per target (`DEFAULT_LED_GPIO`): 25 on ESP32, 22 on C6 (XIAO D4, the user's carrier board),
   0 elsewhere. C6 GPIO 24..30 are flash pins.
   Boot validates every channel GPIO with `settings_check_gpio` before touching it.
+  **XIAO antenna switch** (0.24.0, 2026-11-13; user's choices: both WiFi C6 variants get a XIAO twin, a saved setting):
+  `CONFIG_KTSN_XIAO_C6_ANTENNA` (preset `sdkconfig.xiaoc6`, variants `esp32c6-xiao` build-c6x and
+  `esp32c6-xiao-parlio` build-c6xp; the plain C6 variants stay generic). `main/antenna.c`: GPIO3 low powers the RF
+  switch, GPIO14 selects (low built-in ceramic, high U.FL); levels are set before the pins become outputs, at boot right
+  after settings_init (before WiFi), and on change. `g_set.antenna_ext`, NVS `antenna` (u8 1, erased when internal;
+  loaded and saved by every build, so a plain build keeps a XIAO board's choice). Console `antenna`, API config
+  `antenna` (only in XIAO builds; the IDE shows its selector when the field is there; a patch elsewhere is an error).
+  `settings_check_gpio` / `_in` refuse 3 and 14 in these builds. Not in config files (it belongs to the board's
+  physical antenna).
 - Networking: WiFi station + SNTP, token-protected TCP CLI (telnet/netcat), HTTP/JSON API, mDNS (`<hostname>.local`).
 
 ## Layout
@@ -75,7 +84,10 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   a new variant goes in that script's list, the CI matrix and BUILD.md. Keep personal data (the user's location, IPs,
   serial numbers) out of committed files. **Verified by the user**: the v0.18.0 release zips flash and run for
   `esp32c6` (2026-11-11), `esp32-4mb`, `esp32-2mb` and `esp32-2mb-nowifi` (2026-11-12). Not flashed from a zip:
-  `esp32c6-parlio`, `esp32c6-nowifi` (built and packaged the same way).
+  `esp32c6-parlio`, `esp32c6-nowifi` (built and packaged the same way). v0.23.1 released 2026-11-13 (notes cover
+  0.19.0..0.23.1; firmware 0.23.0 confirmed by the user on the C6 and ESP32, 0.23.1 changed only the IDE); its zips
+  not flashed yet. v0.26.0 released 2026-11-13 (notes cover 0.24.0..0.26.0; 0.26.0 flashed and confirmed by the user
+  on the C6 with the MAX9814); its zips not flashed yet.
 
 ## Design decisions (keep these unless there is a reason to change them)
 - Pixel layout `0xWWRRGGBB`. Color order is applied only at output (`led_out.c`, per channel wire format). Global intensity is applied at output, not baked into buffers.
@@ -329,8 +341,23 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   without one); IDE preview Audio row (`core/audio.ts`: `usesAudio` shows it for programs reading the audio env
   names, `fakeAudio(t, bpm)` is pure: kick envelope in bands 0..2 per beat, hats in 6..7 between beats, mids wobble;
   bands change per 32 ms block and a block shows the beat that started in it; time = preview frames, so it follows
-  speed and stepping; WASM `lc_set_audio`, core `setAudio`, null = no input). **Not done yet** (needs the user's
-  microphone): tuning AUDIO_GATE (6 counts is below the C6's floating-pin noise) and the beat detection on music.
+  speed and stepping; WASM `lc_set_audio`, core `setAudio`, null = no input).
+  **Noise gate** (0.26.0, 2026-11-13, from the user's MAX9814 measurements): the automatic gain turned room noise up to
+  fill the range within ~10 s of quiet (peak falls 3 dB/s), whatever the mic's gain. Measured (C6, `audio watch`):
+  MAX9814 at 60 dB: quiet swing ~170..420, quiet music ~320..825 (only ~8 dB apart: the mic's own AGC boosts the noise);
+  at 40 dB: quiet ~21..41 (with occasional real sounds ~100), the same music ~120..780 (~20 dB apart) -> recommend
+  40 dB. The gate (`audio_t.gate`, set by io.c from `g_set.audio_gate` before every block; NVS u16 "agate", 0 = off,
+  the default; at most AUDIO_GATE_MAX 2000) compares the block's **RMS** (`audio_t.rms`, integer sqrt) rather than
+  swing (one click would open it): a block below it takes the silence path (outputs fall, nothing learned, no beats).
+  Above it, `gain_map` gets the gate's place on each scale (the block is `above` = log2(sumsq) - log2(N gate^2) over
+  it, so the gate lies that far below this block's total / loudest band): the range's bottom never goes below the
+  gate and spans at least GATE_SPAN (12 dB) above it, so sound just over the gate shows dim (continuous: 0 at the gate)
+  instead of filling the range. `audio_gate_learn` (portable): 90th percentile of the blocks' RMS x 1.5 (~3.5 dB).
+  Console `audio gate [<rms> | off | learn [1..30 s]]` (learn: io_audio_learn_begin/end collect each block's RMS into
+  a malloc'd buffer, cmd_unlock while listening), `audio`/`audio watch` show `rms` and "(gated)"; API config
+  `audio_gate` (GET/PATCH 0..2000), status `audio.rms`; IDE Board panel row "audio": rms, gate field, Learn button
+  (`audio gate learn 5` over cmd; the HTTP timeout is 8 s). Swing < AUDIO_GATE (6) still counts as silence (a dead pin).
+  Beat detection on real music: beats looked plausible in the user's watch output; not tuned further yet.
 - **Strings** (2026-10-31; plan agreed 2026-10-30): `V_STR` / `A_STR`, value `strref_t {p, len}`, a view (not
   NUL-terminated; `str-sub` returns part of another string without copying). Literals `"..."` (one line, at most
   `DSL_STR_MAX` 255, escapes only `\"` and `\\`; the parser counts first, then copies into the AST arena: no stack
@@ -531,6 +558,29 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   (`usedNames`, `localSources`, `loadUses`, `usesFirst`), App effect feeds `core.setUseSources` (connected: board programs
   reachable from the open tabs; offline: local library), `Editor.recheck` re-lints when they change, upload compiles with
   `core.checkUsing` against board + selection.
+- **Lists** (0.25.0, 2026-11-13; plan agreed with the user: a constant list form instead of a list type with push,
+  stateless time-slot picks, distinct seeds per channel, palettes too, a library-prefix variant):
+  `(list a b ...)` is compiled by the compiler (`compile_list`, like `fn`: not a native, so no DSL_MAX_ARGS limit;
+  `DSL_LIST_MAX` 255) into a `dsl_list_t` in the program block: entry type (one for all; int and decimal don't mix),
+  count, id (its number in the program), stack, and the entries as `arg_t` (constants or nodes), **evaluated only when
+  picked** (`dsl_list_item`). `V_LIST` / `A_LIST`: a list is always a constant, allowed only where a native takes
+  A_LIST and as a `def` value; a list variable has no run-time value (`var_t.list`: uses become the constant), can't
+  be redefined, and lists can't be `if` results, function results, entries of lists or other values (LIST_ONLY
+  message). Natives `list-len` (NF_FOLD), `list-nth` (outside = fault), `list-pick l period`; their result type is
+  the list's entry type (`bind_list_ret`). Named `list-*` like `str-*` because user functions named `len`, `nth`,
+  `pick` exist in tests (new natives would break such programs); a program's own `defn list` keeps the name (the
+  form is only recognised when there is no such function).
+  **Picks** (`dsl_pick_index(n, seed, slot)`, natives.c): slot = local clock seconds (`env_seconds` from year/doy/h/m/s;
+  uptime-based before the clock is set) / period; rounds of n slots each a Fisher-Yates shuffle seeded by
+  (seed, round); a round starting with the previous round's last entry swaps its first two (n >= 3; n == 2
+  alternates). Stateless, so every automation run or frame in a slot agrees, and reboots don't matter. Seeds:
+  list-pick = `channel_t.id` (set in main.c) x list id; play-pick = target channel x list id; play-library = target
+  channel x prefix. `play-pick ch list [period]` / `play-library ch prefix [period]` (automation): without a period,
+  keep what automation put there if it is in the list / has the prefix (`dsl_host_t.playing`), else a random one
+  (channel rng). play-library reads names through `dsl_host_t.lib_match` (firmware: progs_list + qsort, at most 255;
+  WASM: the board's library list, offline the prefix itself). `play` takes A_STR with `NF_NAME1`: a bare name is
+  always the program's name (V_SYM, never a variable, as before), a string may be made at run time (bad name =
+  fault); constant names are checked when compiling everywhere (play, play-pick lists).
 - **Lazy natives** (`NF_LAZY`: `if`, `and`, `or`) get `args == NULL`, read `c->node` on entry and evaluate their own args
   with `dsl_eval_arg`. Use this for anything that must not evaluate all args (short-circuit, branches).
 - **Result types:** each node has `ret` (= `def->ret` unless the bind hook refines it, e.g. `if` takes its branches' common
@@ -607,12 +657,17 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
                                                precision given; time-in end exclusive, wraps past midnight
     (date-gt|ge|lt|le|eq <d>) (date-in <from> <to>)  today vs "MM-DD" (every year) / "YYYY-MM-DD"; date-in both
                                                ends included, MM-DD wraps past New Year; all nil while timeset is 0
+    (list <a> <b>...)                          1..255 values of one type (compiler form; def it or pass it)
+    (list-len <l>) (list-nth <l> <i>)          entries; entry i (negative from the end, outside = fault)
+    (list-pick <l> <period>)                   entry for now: shuffled rounds per period (seconds), per channel and list
     (str-cat <a> <b>...)                       2..10 strings or numbers (numbers as str-num's default); cut at 255
     (str-sub <s> [start] [end])                part of s, range rules; (str-len <s>) -> int
   Automation program only (compile error elsewhere; it may use G0..G7 and env, not X Y Z O):
     (intensity [ch])                           global / channel intensity now, decimal 0..1
     (set-intensity <ch|_> <0..1> [fade s])     _ = global; fades frame by frame on the board
-    (play <ch> <name>)                         run a library program on the channel (name checked at compile time)
+    (play <ch> <name|str>)                     run a library program on the channel (constant names checked at compile time)
+    (play-pick <ch> <list> [period])           one of the list's programs (strings), shuffled per period; none: keep
+    (play-library <ch> <prefix> [period])      the same over the library programs whose names start with prefix
     (stop <ch>)                                the channel goes dark
     (io-set <out|name> <t|nil|0..1>)           GPIO output: switch it, or a PWM level (binary: > 0 = on)
     (io <out|name>)                            where the output is now, decimal 0..1
@@ -627,7 +682,15 @@ Console: `version` (what runs, slot, unconfirmed update?, other slot), `prog <ch
 `tz [POSIX TZ]`, `loc [<lat> <lon> | off]`, `save`, `config [erase]`, `reboot`.
 
 ## Status / known unverified parts
-Host tests: 6060 checks, 0 failures (macOS clang and gcc). **Builds cleanly with ESP-IDF v6.1 for esp32, flashed and running; RGB color order confirmed on the WS2811 string.**
+- Lists and picks (0.25.0, 2026-11-13): host-tested (`t_lists`: types, lazy entries, 100 entries, the 255 limit,
+  faults, ~20 compile errors, old user functions named list/len/nth; the shuffle for n = 2..255 over 40 rounds, seeds;
+  list-pick per period, channel and list; `t_play_pick`: play with strings, play-pick with and without a period,
+  play-library prefixes and rounds, missing hooks), IDE tests (reference examples run, preview list-pick), checked by
+  Claude in the dev-server preview (palette changes every period), builds for every variant. **Not run on hardware.**
+- XIAO antenna switch (0.24.0, 2026-11-13): builds for every variant, IDE Board panel selector checked by Claude
+  against a mock board. **Verified by the user on a XIAO C6** (2026-11-13): selecting the external antenna
+  raised RSSI by ~10 dB.
+Host tests: 6158 checks, 0 failures (macOS clang and gcc). **Builds cleanly with ESP-IDF v6.1 for esp32, flashed and running; RGB color order confirmed on the WS2811 string.**
 - Toolchain: `source ~/.espressif/tools/activate_idf_v6.1.sh` (EIM install).
 - `led_strip` is pinned to `^3.0.0` (3.x uses `color_component_format`; 2.x used `led_pixel_format`). Color order is the per-channel wire format (it was `LED_COLOR_FORMAT` in `config.h` until 2026-10-18).
 - `main` requires `esp_driver_rmt` (not the legacy `driver` component).
@@ -708,7 +771,12 @@ Host tests: 6060 checks, 0 failures (macOS clang and gcc). **Builds cleanly with
   phase 3 continues (agreed rule: stop if it doesn't). 0.23.0 (preview fake beat, API status `audio`, beatms none = 2147483647): IDE tests,
   checked by Claude in the dev-server preview (bass bar jumps every 500 ms at 120 bpm, flash on each beat; fake beat
   off = dark), builds for every variant. **0.23.0 flashed and confirmed working by the user on the C6 and the ESP32**
-  (2026-11-13; no microphone yet). **Not run on hardware**: a real microphone, beats in real music, the API `audio` field.
+  (2026-11-13; no microphone yet). **MAX9814 tested by the user** (2026-11-13): FFT bands look good for
+  music; room noise filled the range when quiet -> 0.26.0 noise gate (host-tested: rms, learn percentile, noise
+  dark with a learned gate and no beats, a tone 3 dB over it dim, 15 dB over it full, kicks over a gate still beat;
+  IDE gate field + Learn checked by Claude against a mock board; 8 variants build). **0.26.0 confirmed by the user**
+  (2026-11-13, MAX9814 at 40 dB): `audio gate learn` gave noise rms 7..46 (median 9) -> gate 18, as predicted from
+  the swing measurements; the user says it looks good.
 - GPIO inputs (0.20.0, 2026-11-12): host-tested (`t_inputs`: names, kinds, samples, clamping, mode changed after
   compiling, hosts without modes, automation reading inputs), IDE tests (core: offline names, board kinds; preview
   input discovery), builds for every variant (ESP32 2 MB WiFi image 27% free after the ADC driver). **Verified by the
@@ -798,8 +866,8 @@ Still unverified on hardware:
 
 ## Next steps (planned)
 - Time comparisons, inputs, audio (plan agreed with the user 2026-11-12; pushed with CI on the user's word 2026-11-12,
-  with audio untested on a microphone: **still to do when the user's mic arrives**: tune AUDIO_GATE and beat detection
-  on real music). One handover + bump per phase:
+  with audio untested on a microphone; the user's MAX9814 arrived 2026-11-13: noise gate in 0.26.0, beat detection
+  on real music still to judge). One handover + bump per phase:
   - Phase 1, 0.19.0 (done 2026-11-12, see Status): `time-gt/ge/lt/le/eq <t>`, `(time-in <from> <to>)` (wraps midnight, end exclusive);
     `date-gt/ge/lt/le/eq <d>`, `(date-in <from> <to>)` (wraps the year end, end inclusive). Times: a `"HH:MM[:SS]"`
     literal (checked at compile time) or a number = minutes after midnight (decimal for seconds; negative, e.g.

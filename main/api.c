@@ -2,6 +2,7 @@
  * Settings and channels are only touched under cmd_lock, like every console command. cJSON uses doubles: fine here
  * (config path only), never in the render path. */
 #include "api.h"
+#include "antenna.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -150,6 +151,7 @@ api_result_t api_status(void)
         cJSON_AddNumberToObject(a, "beats", aus.beats);
         cJSON_AddNumberToObject(a, "beatms", io_audio_beatms());
         cJSON_AddNumberToObject(a, "swing", aus.swing);
+        cJSON_AddNumberToObject(a, "rms", aus.rms);
         cJSON_AddNumberToObject(a, "adc_hz", aus.adc_hz);
         cJSON_AddNumberToObject(a, "blocks", aus.blocks);
         cJSON_AddNumberToObject(a, "us_avg", aus.us_avg);
@@ -227,6 +229,7 @@ api_result_t api_get_config(void)
     if (g_set.automation) cJSON_AddStringToObject(j, "automation", g_set.automation);
     else cJSON_AddNullToObject(j, "automation");
     cJSON_AddNumberToObject(j, "automation_every", g_set.auto_every);
+    cJSON_AddNumberToObject(j, "audio_gate", g_set.audio_gate);           /* RMS in ADC counts, 0 = off */
     cJSON_AddNumberToObject(j, "intensity", render_intensity_target(INTENSITY_GLOBAL));   /* 0..256 (target if fading) */
     cJSON *ios = cJSON_AddArrayToObject(j, "io");                          /* configured outputs only */
     for (int i = 0; i < IO_MAX; i++) {
@@ -260,6 +263,9 @@ api_result_t api_get_config(void)
     cJSON_AddStringToObject(w, "ssid", g_set.ssid);
     cJSON_AddBoolToObject(w, "password_set", g_set.pass[0] != 0);
     cJSON_AddStringToObject(j, "hostname", g_set.hostname);
+#if CONFIG_KTSN_XIAO_C6_ANTENNA                        /* only in builds with the switch: the IDE shows it when present */
+    cJSON_AddStringToObject(j, "antenna", g_set.antenna_ext ? "external" : "internal");
+#endif
     cJSON_AddBoolToObject(j, "token_set", g_set.token[0] != 0);
     cJSON_AddBoolToObject(j, "reboot_needed", reboot_needed());
     cmd_unlock();
@@ -330,12 +336,15 @@ api_result_t api_patch_config(const cJSON *root)
     strcpy(tz, g_set.tz); strcpy(ntp, g_set.ntp); strcpy(ssid, g_set.ssid); strcpy(pass, g_set.pass); strcpy(token, g_set.token);
     strcpy(host, g_set.hostname);
     bool loc_set = false, loc_off = false;
+#if CONFIG_KTSN_XIAO_C6_ANTENNA
+    int antenna = -1;                                     /* 0 internal, 1 external, -1 unchanged */
+#endif
     double loc_lat = 0, loc_lon = 0;
     bool tz_set = false, ntp_set = false, wifi_set = false, token_set = false, layout_set = false, save = false, host_set = false;
     int auto_action = 0;                                  /* 1 = set, 2 = clear */
     int automat_action = 0;                               /* automation: 1 = set, 2 = clear */
     const char *automat_src = NULL;
-    long auto_every = -1;
+    long auto_every = -1, audio_gate = -1;
     const char *auto_src = NULL;
     io_cfg_t io[IO_MAX];
     memcpy(io, g_set.io, sizeof io);
@@ -383,6 +392,14 @@ api_result_t api_patch_config(const cJSON *root)
             if (!json_str(errs, k, item, host, sizeof host, false)) continue;
             const char *why = settings_check_hostname(host);
             if (why) err_at(errs, k, why); else host_set = true;
+        } else if (!strcmp(k, "antenna")) {
+#if CONFIG_KTSN_XIAO_C6_ANTENNA
+            if (cJSON_IsString(item) && !strcmp(item->valuestring, "internal")) antenna = 0;
+            else if (cJSON_IsString(item) && !strcmp(item->valuestring, "external")) antenna = 1;
+            else err_at(errs, k, "must be \"internal\" or \"external\"");
+#else
+            err_at(errs, k, "this build has no antenna switch (XIAO C6 builds only)");
+#endif
         } else if (!strcmp(k, "token")) {
             if (!cJSON_IsString(item)) { err_at(errs, k, "must be a string (clearing it is only possible on the serial console)"); continue; }
             const char *why = settings_check_token(item->valuestring);
@@ -396,6 +413,8 @@ api_result_t api_patch_config(const cJSON *root)
             else if (!item->valuestring[0]) automat_action = 2;
             else if (automation_check(item->valuestring, aerr, sizeof aerr)) err_at(errs, k, aerr);
             else { automat_action = 1; automat_src = item->valuestring; }
+        } else if (!strcmp(k, "audio_gate")) {
+            if (!json_int(item, 0, AUDIO_GATE_MAX, &audio_gate)) err_at(errs, k, "must be an integer 0..2000 (rms in ADC counts, 0 = off)");
         } else if (!strcmp(k, "automation_every")) {
             if (!json_int(item, 1, AUTO_EVERY_MAX, &auto_every)) err_at(errs, k, "must be an integer 1..3600 (seconds)");
         } else if (!strcmp(k, "autoexec")) {
@@ -638,11 +657,15 @@ api_result_t api_patch_config(const cJSON *root)
     if (wifi_set) { strcpy(g_set.ssid, ssid); strcpy(g_set.pass, pass); }
     if (token_set) strcpy(g_set.token, token);
     if (host_set) strcpy(g_set.hostname, host);
+#if CONFIG_KTSN_XIAO_C6_ANTENNA
+    if (antenna >= 0) { g_set.antenna_ext = antenna == 1; antenna_apply(); }
+#endif
 #if CONFIG_KTSN_WIFI                                    /* without WiFi they are stored, for a WiFi build to use */
     if (ntp_set) net_ntp_apply();
     if (host_set) net_hostname_apply();
 #endif
     if (auto_every > 0) g_set.auto_every = (uint16_t)auto_every;
+    if (audio_gate >= 0) g_set.audio_gate = (uint16_t)audio_gate;
     if (automat_action) { char aerr[DSL_ERR_LEN]; automation_set(automat_action == 1 ? automat_src : NULL, aerr, sizeof aerr); }
     if (auto_action == 2) { free(g_set.autoexec); g_set.autoexec = NULL; }
     if (auto_action == 1) { char *copy = strdup(auto_src); if (copy) { free(g_set.autoexec); g_set.autoexec = copy; } }

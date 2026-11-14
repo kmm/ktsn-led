@@ -7,6 +7,7 @@
 #if CONFIG_KTSN_WIFI
 #include "net.h"
 #endif
+#include "antenna.h"
 #include "automation.h"
 #include "sky.h"
 #include "io.h"
@@ -47,6 +48,9 @@ void app_main(void)
 {
     cmd_init();
     ESP_ERROR_CHECK(settings_init());
+#if CONFIG_KTSN_XIAO_C6_ANTENNA
+    antenna_apply();        /* before WiFi starts */
+#endif
     settings_apply_tz();
     io_apply();             /* outputs off as early as possible (relays) */
     g_env.intensity = g_set.intensity;
@@ -66,6 +70,7 @@ void app_main(void)
             break;
         }
         g_channels[i].rng = esp_random() | 1u;          /* xorshift state must be nonzero */
+        g_channels[i].id = (uint8_t)i;                  /* list-pick seeds: channels pick differently */
         g_nchannels = i + 1;
         char *src = settings_load_prog(i);
         if (src) {

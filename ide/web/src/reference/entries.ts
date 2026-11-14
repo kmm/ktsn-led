@@ -2,7 +2,7 @@
 // Tests check that every function the compiler knows has an entry, that argument counts match the compiler's table,
 // and that every example compiles. Keep the wording in sync with the firmware's behaviour (CLAUDE.md "DSL conventions").
 
-export type ArgType = 'buffer' | 'color' | 'int' | 'number' | 'number or color' | '0..1' | 'boolean' | 'name' | 'value' | 'string' | 'int or string' | 'string or number' | 'function' | 'parameters' | 'body';
+export type ArgType = 'buffer' | 'color' | 'int' | 'number' | 'number or color' | '0..1' | 'boolean' | 'name' | 'value' | 'string' | 'int or string' | 'string or number' | 'function' | 'parameters' | 'body' | 'list' | 'name or string';
 
 export interface ArgSpec {
   name: string;
@@ -24,10 +24,10 @@ export interface Entry {
   context?: 'automation';     // only in the automation program (the example compiles and runs as one)
 }
 
-export type Category = 'Buffers' | 'Filling' | 'Pixels' | 'Blending' | 'Motion' | 'Logic' | 'Math' | 'Environment' | 'Time' | 'Variables' | 'Functions' | 'Text' | 'Displays' | 'Inputs' | 'Automation';
-export const CATEGORIES: Category[] = ['Buffers', 'Filling', 'Pixels', 'Blending', 'Motion', 'Logic', 'Math', 'Environment', 'Time', 'Variables', 'Functions', 'Text', 'Displays', 'Inputs', 'Automation'];
+export type Category = 'Buffers' | 'Filling' | 'Pixels' | 'Blending' | 'Motion' | 'Logic' | 'Math' | 'Environment' | 'Time' | 'Variables' | 'Lists' | 'Functions' | 'Text' | 'Displays' | 'Inputs' | 'Automation';
+export const CATEGORIES: Category[] = ['Buffers', 'Filling', 'Pixels', 'Blending', 'Motion', 'Logic', 'Math', 'Environment', 'Time', 'Variables', 'Lists', 'Functions', 'Text', 'Displays', 'Inputs', 'Automation'];
 /** Words the compiler handles itself (not natives): documented, but not in the compiler's native table. */
-export const KEYWORDS = ['def', 'defn', 'fn', 'use'];
+export const KEYWORDS = ['def', 'defn', 'fn', 'use', 'list'];
 
 const range: ArgSpec[] = [
   { name: 'start', type: 'int', desc: 'first pixel of the range; negative counts from the end', optional: true, def: '0' },
@@ -552,13 +552,45 @@ export const ENTRIES: Entry[] = [
   /* ---------------- Automation (only in the automation program) ---------------- */
   {
     name: 'play', category: 'Automation', context: 'automation', summary: 'Run a library program on a channel.',
-    args: [{ name: 'ch', type: 'int', desc: 'channel number' }, { name: 'name', type: 'name', desc: 'a program in the board\'s library (lib)' }],
+    args: [{ name: 'ch', type: 'int', desc: 'channel number' }, { name: 'name', type: 'name or string', desc: 'a program in the board\'s library (lib): a bare name, or a string' }],
     returns: 'nothing',
-    details: 'Only in the automation program. The name is checked when the automation program is compiled, so a typo or ' +
-      'a program not in the library is a compile error. If the channel already runs that program (and nobody changed ' +
+    details: 'Only in the automation program. A name written in the program (bare, or a string) is checked when the ' +
+      'automation program is compiled, so a typo or a program not in the library is a compile error; a bare name is ' +
+      'always the program\'s name, never a variable. A string made while it runs (str-cat, list-nth) is checked then, ' +
+      'and a name that isn\'t in the library is a fault. If the channel already runs that program (and nobody changed ' +
       'it), nothing happens, so calling play every few seconds is cheap. If the library program was deleted since, ' +
       'the call counts as a fault and the channel keeps what it has.',
     example: '(if (and (ge (env hour) 17) (lt (env hour) 23))\n    (play 0 evening)\n    (stop 0))',
+  },
+  {
+    name: 'play-pick', category: 'Automation', context: 'automation', summary: 'Play one of a list of library programs, a new one every period.',
+    args: [{ name: 'ch', type: 'int', desc: 'channel number' },
+      { name: 'programs', type: 'list', desc: 'library program names as strings: (list "fire" "rain" …)' },
+      { name: 'period', type: 'int', desc: 'seconds each pick lasts', optional: true, def: 'keep what runs' }],
+    returns: 'nothing',
+    details: 'Only in the automation program. With a period, it plays the program list-pick would choose: the clock is cut ' +
+      'into periods, and the programs go round in shuffled rounds, each once per round and never the same twice in a ' +
+      'row. The shuffle depends on the channel, so two channels sharing a list change differently. It needs no memory, ' +
+      'so it gives the same answer on every automation run within a period and carries on after a reboot.\n\n' +
+      'Without a period it keeps the channel\'s program if automation put one from the list there, and otherwise plays ' +
+      'a random one: pair it with a condition (a time, a button) to choose when to change.\n\nNames written in the ' +
+      'list are checked against the library when the program compiles. Like play, nothing happens if the channel ' +
+      'already runs the chosen program.',
+    example: '(def party (list "fire" "rain" "sparkle" "chase"))\n(if (time-in "18:00" "23:00")\n    (play-pick 0 party 900)   ; a new one every 15 minutes\n    (stop 0))',
+  },
+  {
+    name: 'play-library', category: 'Automation', context: 'automation', summary: 'Play one of the library programs whose names start with a prefix.',
+    args: [{ name: 'ch', type: 'int', desc: 'channel number' },
+      { name: 'prefix', type: 'string', desc: 'the start of the names, e.g. "party-" ("" = the whole library)' },
+      { name: 'period', type: 'int', desc: 'seconds each pick lasts', optional: true, def: 'keep what runs' }],
+    returns: 'nothing',
+    details: 'Only in the automation program. Like play-pick, but the list is the board\'s library: every program whose ' +
+      'name starts with the prefix, in name order, read each time it runs. To add a program to the rotation, save it ' +
+      'to the library with a name that has the prefix; no change to the automation program needed. Adding or removing ' +
+      'one changes the shuffle from the next period on.\n\nThe library can change after the automation program is ' +
+      'saved, so the prefix can\'t be checked against it when compiling: if no program has it, that is a fault when ' +
+      'it runs.',
+    example: '(play-library 0 "party-" 600)   ; party-fire, party-rain, …: a new one every 10 minutes',
   },
   {
     name: 'stop', category: 'Automation', context: 'automation', summary: 'Turn a channel off (its program is replaced by black).',
@@ -722,6 +754,43 @@ export const ENTRIES: Entry[] = [
   },
 
   /* ---------------- Functions ---------------- */
+  {
+    name: 'list', category: 'Lists', summary: 'A list of values of one type, as long as you like (up to 255).',
+    args: [{ name: 'entry', type: 'value', desc: 'numbers, colours, buffers (palettes), strings, or t / nil: all of one type', many: 255 }],
+    returns: 'a list (only for list-len, list-nth, list-pick, play-pick, or a def)',
+    details: 'The compiler builds the list, so it isn\'t held to the 10-argument limit of other calls. Put it in a ' +
+      'variable with def, or write it straight where a list goes. A list can\'t change once made (def the name ' +
+      'once), can\'t hold lists, and can\'t be a function\'s result.\n\nEntries are worked out only when one is ' +
+      'picked (list-nth, list-pick), so a long list costs nothing per frame, and an entry that reads a variable sees ' +
+      'its value at that moment.',
+    example: '(def pals (list (slice (buf G0) 0 3) (slice (buf G0) 3 6)))\n(set (buf G0) 0 #FF0000 #FFFF00 #FF0000 #0000FF #00FFFF #0000FF)\n(fill-grad (buf O) (list-nth pals 1))',
+  },
+  {
+    name: 'list-len', category: 'Lists', summary: 'How many entries a list has.',
+    args: [{ name: 'list', type: 'list', desc: 'a list' }],
+    returns: 'int',
+    details: 'Known when the program compiles, so it costs nothing at run time.',
+    example: '(def l (list #FF0000 #00FF00 #0000FF))\n(fill (buf O) (list-nth l (mod (/ (env frame) 30) (list-len l))))',
+  },
+  {
+    name: 'list-nth', category: 'Lists', summary: 'One entry of a list, by position.',
+    args: [{ name: 'list', type: 'list', desc: 'a list' }, { name: 'i', type: 'int', desc: 'position from 0; negative counts from the end (-1 = the last)' }],
+    returns: 'the entry (the list\'s type)',
+    details: 'Only the entry asked for is worked out. A position outside the list is a fault, since there is no entry to ' +
+      'give back. For a random entry every frame use (list-nth l (rand (list-len l))); for one that lasts a while, list-pick.',
+    example: '(def l (list #FF0000 #00FF00 #0000FF))\n(fill (buf O) (list-nth l -1))',
+  },
+  {
+    name: 'list-pick', category: 'Lists', summary: 'The entry for now: a new one every period, shuffled, never the same twice in a row.',
+    args: [{ name: 'list', type: 'list', desc: 'a list' }, { name: 'period', type: 'int', desc: 'seconds each pick lasts (at least 1)' }],
+    returns: 'the entry (the list\'s type)',
+    details: 'The clock is cut into periods. The entries go round in shuffled rounds: each comes once per round, and a ' +
+      'round never starts with the one the last round ended on. It needs no memory, so every frame in a period gives ' +
+      'the same entry, and it carries on after a reboot. The shuffle depends on the channel and on the list, so ' +
+      'channels (and two lists in one program) change differently.\n\nThe periods follow the board\'s local clock; ' +
+      'before the clock is set they count from power-up.',
+    example: '(def pals (list (slice (buf G0) 0 2) (slice (buf G0) 2 4) (slice (buf G0) 4 6)))\n(set (buf G0) 0 #FF0000 #FFFF00 #00FF00 #00FFFF #0000FF #FF00FF)\n(fill-grad (buf O) (list-pick pals 300))   ; a new palette every 5 minutes',
+  },
   {
     name: 'defn', category: 'Functions', summary: 'Define a function: a name, typed parameters and a body, usable anywhere in the program.',
     args: [

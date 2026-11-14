@@ -72,8 +72,12 @@ typedef struct {
     uint32_t blocks, dropped;            /* blocks analysed, ADC overflows (samples lost) since the last reset */
     uint32_t us_avg, us_max;             /* analysis time per block (wall time: includes being interrupted) */
     uint32_t band[AUDIO_BANDS], level, beats;   /* the latest results */
-    uint16_t swing;
+    uint16_t swing, rms, gate;
 } io_audio_stat_t;
 void    io_audio_stat(io_audio_stat_t *st);
 void    io_audio_stat_reset(void);
-int32_t io_audio_beatms(void);           /* ms since the latest beat, DSL_BEATMS_NONE = no audio input or no beat yet */
+int32_t io_audio_beatms(void);
+/* Collect the RMS of every analysed block into buf (at most cap) until io_audio_learn_end, which returns how many.
+ * For `audio gate learn`; buf must stay valid until then. */
+void    io_audio_learn_begin(uint16_t *buf, int cap);
+int     io_audio_learn_end(void);           /* ms since the latest beat, DSL_BEATMS_NONE = no audio input or no beat yet */

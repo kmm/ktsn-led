@@ -21,7 +21,8 @@ typedef struct ast {
  * col C: in <unit> line l: message" (the IDE and the console take L and C for the program they show). */
 typedef struct { const char *src, *p; arena_t *tmp; char *err; size_t errlen; const char *main, *unit, *use_at; } ps_t;
 /* Names -> slots. A slot keeps its first type and belongs to the scope it was made in (slots are never reused). */
-typedef struct { char name[DSL_VAR_NAME_MAX + 1]; uint8_t type; uint16_t scope; } var_t;
+/* A list variable has no value at run time: its uses are the list itself (a constant), so `list` is set instead. */
+typedef struct { char name[DSL_VAR_NAME_MAX + 1]; uint8_t type; uint16_t scope; const dsl_list_t *list; } var_t;
 /* Open scopes, innermost last: the program's top level, a defn body (a barrier: nothing outside it is visible), and
  * (fn ...) bodies inside them (they see the scopes around them up to the barrier). */
 typedef struct { uint16_t id; bool barrier; ufn_t *fn; } scope_t;
@@ -39,6 +40,7 @@ typedef struct {
     scope_t scopes[DSL_MAX_DEPTH + 2]; uint8_t nscopes; uint16_t next_scope;
     ufn_t *cur;                                  /* defn whose body is being compiled; NULL at the top level */
     bool tail;                                   /* the call compiled next is in tail position of cur */
+    uint16_t nlists;                             /* (list ...) forms so far: each one's id */
 } cc_t;
 
 static void perr(ps_t *ps, const char *at, const char *fmt, ...)
@@ -190,8 +192,9 @@ static ast_t *parse_expr(ps_t *ps, int depth)
 }
 
 /* ---------------- type checking / compile ---------------- */
-static const char *const k_atype_names[] = { "buffer", "color", "int", "number", "symbol", "number", "boolean", "value", "number", "string", "function" };
-static const char *const k_vtype_names[] = { "nothing", "int", "number", "color", "buffer", "symbol", "boolean", "string", "function" };
+static const char *const k_atype_names[] = { "buffer", "color", "int", "number", "symbol", "number", "boolean", "value", "number", "string", "function", "list" };
+static const char *const k_vtype_names[] = { "nothing", "int", "number", "color", "buffer", "symbol", "boolean", "string", "function", "list" };
+_Static_assert(sizeof k_atype_names / sizeof *k_atype_names == A_LIST + 1 && sizeof k_vtype_names / sizeof *k_vtype_names == V_LIST + 1, "type names");
 
 bool dsl_coerce(atype_t want, value_t in, value_t *out)
 {
@@ -204,6 +207,7 @@ bool dsl_coerce(atype_t want, value_t in, value_t *out)
     case A_BOOL:  return in.type == V_BOOL;
     case A_STR:   return in.type == V_STR;
     case A_FN:    return in.type == V_FN;
+    case A_LIST:  return in.type == V_LIST;
     case A_ANY:   return true;
     case A_NUMERIC: return in.type == V_INT || in.type == V_FIX;
     case A_NUM:
@@ -237,6 +241,7 @@ static bool ret_ok(atype_t want, uint8_t ret)
     case A_BOOL:  return ret == V_BOOL;
     case A_STR:   return ret == V_STR;
     case A_FN:    return ret == V_FN;
+    case A_LIST:  return ret == V_LIST;
     case A_ANY:   return true;
     }
     return false;
@@ -244,6 +249,11 @@ static bool ret_ok(atype_t want, uint8_t ret)
 
 static node_t *compile_call(cc_t *cc, const ast_t *lst);
 static bool compile_fn_arg(cc_t *cc, const ast_t *a, arg_t *out);
+static bool compile_list(cc_t *cc, const ast_t *lst, arg_t *out);
+static bool is_form(const ast_t *e, const char *head);
+/* (list ...), unless the program defines its own function named list (written before 0.25.0: it keeps working). */
+#define is_list_form(cc, e) (is_form(e, "list") && find_fn(cc, "list") < 0)
+#define LIST_ONLY "a list goes to list-nth, list-len, list-pick or play-pick, or into a variable with def"
 static int find_fn(const cc_t *cc, const char *name);
 
 /* Numbers are not booleans, decimals are not ints: point at the fix. */
@@ -301,6 +311,11 @@ static node_t *new_node(cc_t *cc, const native_def_t *def, uint8_t ret, uint8_t 
 static bool compile_var_ref(cc_t *cc, const ast_t *a, atype_t want, int slot, arg_t *out)
 {
     uint8_t type = cc->vars[slot].type;
+    if (type == V_LIST && want == A_LIST) {              /* the list itself: a constant */
+        out->val.type = V_LIST; out->val.u.list = cc->vars[slot].list;
+        return true;
+    }
+    if (type == V_LIST) { perr(cc->ps, a->at, "'%s' is a list: %s", a->s, LIST_ONLY); return false; }
     if (!ret_ok(want, type)) {
         perr(cc->ps, a->at, "expected %s, but variable '%s' is %s%s", k_atype_names[want], a->s, k_vtype_names[type], bool_hint(want, type));
         return false;
@@ -324,6 +339,11 @@ static bool compile_arg(cc_t *cc, const ast_t *a, atype_t want, bool optional, a
         return true;
     }
     if (want == A_FN) return compile_fn_arg(cc, a, out);
+    if (is_list_form(cc, a)) {
+        if (want != A_LIST) { perr(ps, a->at, "%s", LIST_ONLY); return false; }
+        return compile_list(cc, a, out);
+    }
+    if (want == A_LIST && a->kind != K_SYM) { perr(ps, a->at, "expected a list: (list a b ...) or a variable made with (def name (list ...))"); return false; }
 
     if (a->kind == K_LIST) {
         node_t *sub = compile_call(cc, a);
@@ -403,6 +423,7 @@ static node_t *compile_call(cc_t *cc, const ast_t *lst)
     if (!strcmp(h->s, "defn")) { perr(ps, lst->at, "defn only works at the top level of a program"); return NULL; }
     if (!strcmp(h->s, "use")) { perr(ps, lst->at, "use only works at the top level of a program"); return NULL; }
     if (!strcmp(h->s, "fn")) { perr(ps, lst->at, "fn makes a function to pass to map-px or repeat; it can't be used here"); return NULL; }
+    if (!strcmp(h->s, "list") && find_fn(cc, "list") < 0) { perr(ps, lst->at, "%s", LIST_ONLY); return NULL; }
     const native_def_t *def = dsl_find_native(h->s);
     const ufn_t *uf = NULL;                              /* a user function call (not a self tail call) */
     if (!def) {
@@ -445,11 +466,13 @@ static node_t *compile_call(cc_t *cc, const ast_t *lst)
         /* NF_IDARG: a bare name (not a variable, t or nil) in the first position goes to the bind hook as a symbol */
         if (i == 0 && (def->flags & NF_IDARG) && a->kind == K_SYM && strcmp(a->s, "_") && strcmp(a->s, "t") && strcmp(a->s, "nil")
             && find_var(cc, a->s) < 0) want = A_SYM;
+        if (i == 1 && (def->flags & NF_NAME1) && a->kind == K_SYM && strcmp(a->s, "_")) want = A_SYM;   /* (play 0 fire) */
         cc->tail = tail && is_if && i > 0;               /* an if's branches are in tail position if the if is */
         bool ok = compile_arg(cc, a, want, i >= def->min_args || (i == 0 && (def->flags & NF_OPT0)), &args[i]);
         cc->tail = false;
         if (!ok) return NULL;
-        uint16_t st = args[i].node ? args[i].node->stack : args[i].val.type == V_FN ? STK_FN_ARG + args[i].val.u.fn->stack : 0;
+        uint16_t st = args[i].node ? args[i].node->stack : args[i].val.type == V_FN ? STK_FN_ARG + args[i].val.u.fn->stack
+                    : args[i].val.type == V_LIST ? STK_CALL + args[i].val.u.list->stack : 0;
         if (st > deepest) deepest = st;
     }
     node->stack = deepest + (uf ? STK_USER + n * STK_VALUE : def->fn == dsl_utail ? STK_TAIL + n * STK_VALUE
@@ -525,11 +548,19 @@ static node_t *compile_def(cc_t *cc, const ast_t *lst)
     }
     if (!name_free(cc, name)) return NULL;
     arg_t val;
+    if (is_list_form(cc, expr)) {                        /* a name for the list: no slot value, uses get the list */
+        if (find_var(cc, name->s) >= 0) { perr(ps, name->at, "'%s' is already defined; a list can't change, give it another name", name->s); return NULL; }
+        int ls;
+        if (!compile_list(cc, expr, &val) || (ls = new_var(cc, name, V_LIST)) < 0) return NULL;
+        cc->vars[ls].list = val.val.u.list;
+        return new_node(cc, &dsl_const, V_NIL, 1, lst->at);    /* nothing to do at run time */
+    }
     if (!compile_arg(cc, expr, A_ANY, false, &val)) return NULL;      /* compiled first: may read the old value */
     uint8_t type = val.node ? val.node->ret : val.val.type;
     if (type == V_NIL) { perr(ps, expr->at, "'def' needs a value, but this returns nothing"); return NULL; }
     if (type == V_SYM) { perr(ps, expr->at, "'def' can't store a bare name"); return NULL; }
     int slot = find_var(cc, name->s);
+    if (slot >= 0 && cc->vars[slot].type == V_LIST) { perr(ps, name->at, "'%s' is a list; a list can't change, give it another name", name->s); return NULL; }
     if (slot >= 0 && cc->vars[slot].type != type) {
         perr(ps, expr->at, "'%s' is already %s, it can't become %s%s", name->s, k_vtype_names[cc->vars[slot].type], k_vtype_names[type],
              cc->vars[slot].type == V_INT && type == V_FIX ? " (define it as a decimal from the start, e.g. 1.0)" : "");
@@ -661,6 +692,45 @@ static bool compile_fn_arg(cc_t *cc, const ast_t *a, arg_t *out)
     }
     out->val.type = V_FN;
     out->val.u.fn = f;
+    return true;
+}
+
+/* (list a b ...): entries of one type (not nothing, names, functions or lists), compiled in place, evaluated when picked. */
+static bool compile_list(cc_t *cc, const ast_t *lst, arg_t *out)
+{
+    ps_t *ps = cc->ps;
+    int n = 0;
+    for (const ast_t *a = lst->child->next; a; a = a->next) n++;
+    if (!n) { perr(ps, lst->at, "a list needs at least one entry: (list a b ...)"); return false; }
+    if (n > DSL_LIST_MAX) { perr(ps, lst->at, "too many list entries (max %d)", DSL_LIST_MAX); return false; }
+    dsl_list_t *l = arena_alloc(cc->pa, sizeof *l + (size_t)n * sizeof(arg_t));
+    if (!l) { perr(ps, lst->at, "program too large"); return false; }
+    memset(l, 0, sizeof *l + (size_t)n * sizeof(arg_t));
+    l->n = (uint8_t)n;
+    l->id = cc->nlists++;
+    bool tail = cc->tail;
+    cc->tail = false;
+    int i = 0;
+    for (const ast_t *a = lst->child->next; a; a = a->next, i++) {
+        if (is_list_form(cc, a)) { perr(ps, a->at, "a list can't hold lists"); return false; }
+        if (!compile_arg(cc, a, A_ANY, false, &l->items[i])) return false;
+        const arg_t *it = &l->items[i];
+        uint8_t t = it->node ? it->node->ret : it->val.type;
+        if (t == V_NIL || t == V_SYM || t == V_FN || t == V_LIST || t == V_TAILCALL) {
+            perr(ps, a->at, t == V_NIL ? "a list entry must be a value: this returns nothing" : "a list entry must be a number, colour, buffer, string or t/nil");
+            return false;
+        }
+        if (!i) l->type = t;
+        else if (t != l->type) {
+            perr(ps, a->at, "list entries must all be one type: this is %s, the first is %s", k_vtype_names[t], k_vtype_names[l->type]);
+            return false;
+        }
+        if (it->node && it->node->stack > l->stack) l->stack = it->node->stack;
+    }
+    cc->tail = tail;
+    out->node = NULL;
+    out->val.type = V_LIST;
+    out->val.u.list = l;
     return true;
 }
 

@@ -86,8 +86,29 @@ static char *wh_lib_load(const char *name)
     return e && e->src ? strdup(e->src) : NULL;
 }
 static const char *wh_lib_why(const char *name) { const lib_src_t *e = lib_find(name); return e ? e->why : NULL; }
+/* play-library: the names in the connected board's library list (in name order); without one, the prefix itself
+ * stands in for a single match (play does nothing here anyway). play-pick: nothing counts as playing. */
+static int wh_name_cmp(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
+static int wh_lib_match(const char *prefix, int k, char name[16])
+{
+    if (!s_lib) { if (k == 0) snprintf(name, 16, "%s", prefix[0] ? prefix : "any"); return 1; }
+    const char *found[DSL_LIST_MAX];
+    char buf[DSL_LIST_MAX][16];
+    int n = 0;
+    size_t plen = strlen(prefix);
+    for (const char *p = s_lib + 1; *p && n < DSL_LIST_MAX; ) {
+        const char *e = strchr(p, '\n');
+        if (!e) break;
+        size_t len = (size_t)(e - p);
+        if (len && len < 16 && len >= plen && !strncmp(p, prefix, plen)) { memcpy(buf[n], p, len); buf[n][len] = 0; found[n] = buf[n]; n++; }
+        p = e + 1;
+    }
+    qsort(found, (size_t)n, sizeof *found, wh_name_cmp);
+    if (k >= 0 && k < n) snprintf(name, 16, "%s", found[k]);
+    return n;
+}
 static const dsl_host_t k_wasm_host = { wh_n, wh_get, wh_set, wh_play, wh_stop, wh_exists, wh_io_find, wh_io_used, wh_io_get, wh_io_set,
-                                        wh_lib_load, wh_lib_why, wh_io_mode, wh_in_get, wh_analog_get };
+                                        wh_lib_load, wh_lib_why, wh_io_mode, wh_in_get, wh_analog_get, NULL, wh_lib_match };
 
 /* (Re)create the simulated channel with npix pixels. Globals are created once and keep their contents. */
 EMSCRIPTEN_KEEPALIVE int lc_init(int npix)

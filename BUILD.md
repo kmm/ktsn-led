@@ -97,6 +97,19 @@ One LED channel with WiFi (RMT memory), default GPIO 22 (D4).
 
 All strings in one DMA transfer (immune to WiFi timing); defaults to two channels on GPIO 22 and 23 (D4, D5).
 
+### XIAO antenna switch (RMT or PARLIO, WiFi)
+
+    idf.py -B build-c6x -D SDKCONFIG=build-c6x/sdkconfig -D IDF_TARGET=esp32c6 \
+           -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.flash4mb;sdkconfig.usbjtag;sdkconfig.xiaoc6" build
+
+Variants `esp32c6-xiao` (`build-c6x`) and `esp32c6-xiao-parlio` (`build-c6xp`, with `;sdkconfig.parlio` before
+`;sdkconfig.xiaoc6`): the same builds plus the XIAO ESP32-C6's RF switch between its ceramic antenna and the U.FL
+connector. `antenna internal|external` (console), `antenna` in the API config and a selector in the IDE Board panel;
+applies at once, `save` keeps it, set at boot before WiFi starts. GPIO3 (switch power, driven low) and GPIO14
+(selection) are reserved, so channels and io slots can't use them; neither is on the XIAO's pins. Only for the XIAO:
+on another C6 board these pins may be wired to something else. A network update can move a board between these and
+the plain `esp32c6` builds (the saved choice is kept and applies again in a XIAO build).
+
 ### No WiFi (RMT or PARLIO) — verified on hardware
 
     idf.py -B build-c6-nowifi -D SDKCONFIG=build-c6-nowifi/sdkconfig -D IDF_TARGET=esp32c6 \

@@ -75,6 +75,39 @@ static const char *host_stop(int ch)
     return NULL;
 }
 
+/* What automation put on ch, while nobody else has set a program there since (play-pick / play-library keep it). */
+static const char *host_playing(int ch)
+{
+    if (ch < 0 || ch >= CHANNELS_MAX || !s_playing[ch][0] || !strcmp(s_playing[ch], STOPPED) || g_channels[ch].source != s_set_src[ch]) return NULL;
+    return s_playing[ch];
+}
+
+/* Library programs whose names start with prefix, in name order (NVS lists them in no particular order). */
+typedef struct { const char *prefix; size_t plen; char (*names)[LIB_NAME_MAX + 1]; int n, cap; } match_t;
+static void match_one(const char *key, size_t len, void *ctx)
+{
+    (void)len;
+    match_t *m = ctx;
+    if (strncmp(key, m->prefix, m->plen)) return;
+    if (m->n < m->cap) snprintf(m->names[m->n], sizeof m->names[0], "%s", key);
+    m->n++;
+}
+static int cmp_name(const void *a, const void *b) { return strcmp(a, b); }
+static int host_lib_match(const char *prefix, int k, char name[16])
+{
+    match_t m = { .prefix = prefix, .plen = strlen(prefix), .cap = k < 0 ? 0 : DSL_LIST_MAX };
+    if (k >= 0 && !(m.names = malloc(DSL_LIST_MAX * sizeof *m.names))) return 0;
+    progs_list(PROGS_NS_LIB, match_one, &m);
+    if (k >= 0) {
+        int have = m.n < m.cap ? m.n : m.cap;
+        qsort(m.names, (size_t)have, sizeof *m.names, cmp_name);
+        if (k < have) snprintf(name, 16, "%s", m.names[k]);
+        else m.n = 0;
+        free(m.names);
+    }
+    return m.n;
+}
+
 static const char *host_io_set(int n, uint16_t v)
 {
     const char *why = io_set(n, v);
@@ -86,7 +119,7 @@ _Static_assert((int)IO_BINARY == (int)DSL_IO_BINARY && (int)IO_PWM == (int)DSL_I
                "io.h modes must match the core's DSL_IO_*");
 _Static_assert(IO_ANALOG_FULL == 65536 && IO_SAMPLES_MAX == DSL_ANALOG_SAMPLES_MAX, "io.h analog scale must match the core");
 static const dsl_host_t k_host = { host_nch, host_get, host_set, host_play, host_stop, host_exists, io_find, io_used, io_get, host_io_set, lib_source, NULL,
-                                   io_mode, io_in_get, io_analog_get };
+                                   io_mode, io_in_get, io_analog_get, host_playing, host_lib_match };
 
 void automation_set_host(void) { dsl_set_host(&k_host); }
 

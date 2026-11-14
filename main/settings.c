@@ -1,6 +1,6 @@
 /* Persistent settings in NVS, namespace "ledctl" (the project's old name, kept so
  * boards keep their settings across the rename to KTSN LED).
- * Keys: lat, lon, autoevery, nch, gpio<N>, npix<N>, wire<N>, cint<N>, gam<N>, dith<N>, wmax<N>, wmod<N>, wpt<N>, wrat<N>, refresh, outpar, intens, ssid, pass, ntp, tz, token, host.
+ * Keys: lat, lon, autoevery, nch, gpio<N>, npix<N>, wire<N>, cint<N>, gam<N>, dith<N>, wmax<N>, wmod<N>, wpt<N>, wrat<N>, refresh, outpar, intens, ssid, pass, ntp, tz, token, host, antenna, agate.
  * Program text (prog<N>, auto, automat) lives in the progs partition (progs.c), or here on boards with an older partition table.
  * Loading never fails hard: missing or invalid values fall back to defaults, so a bad save can't brick the boot. */
 #include "settings.h"
@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "antenna.h"
 #include "app.h"
 #include "dither.h"
 #include "gamma.h"
@@ -119,6 +120,7 @@ static void load(nvs_handle_t h)
         if (nvs_get_u16(h, k, &v) == ESP_OK && v <= UNIT_ONE) g_set.cintens[i] = v;
     }
     if (nvs_get_u16(h, "autoevery", &v) == ESP_OK && v >= 1 && v <= AUTO_EVERY_MAX) g_set.auto_every = v;
+    if (nvs_get_u16(h, "agate", &v) == ESP_OK && v <= AUDIO_GATE_MAX) g_set.audio_gate = v;
     uint8_t u8;
     if (nvs_get_u8(h, "refresh", &u8) == ESP_OK && u8 >= 1 && u8 <= REFRESH_MAX) g_set.refresh = u8;
     if (nvs_get_u8(h, "outpar", &u8) == ESP_OK) g_set.out_parallel = u8 != 0;
@@ -149,6 +151,8 @@ static void load(nvs_handle_t h)
     get_str_into(h, "token", g_set.token, sizeof g_set.token);
     get_str_into(h, "host", g_set.hostname, sizeof g_set.hostname);
     if (settings_check_hostname(g_set.hostname)) snprintf(g_set.hostname, sizeof g_set.hostname, "%s", DEFAULT_HOSTNAME);
+    uint8_t ant;
+    if (nvs_get_u8(h, "antenna", &ant) == ESP_OK) g_set.antenna_ext = ant == 1;
 }
 
 /* Pins reserved before any of our drivers ran (flash, PSRAM, ...). Our own LED channels and outputs reserve their
@@ -243,6 +247,8 @@ esp_err_t settings_save(void)
     else { nvs_erase_key(h, "lat"); nvs_erase_key(h, "lon"); }
     TRY(set_or_erase(h, "token", g_set.token));
     TRY(set_or_erase(h, "host", g_set.hostname));
+    TRY(g_set.audio_gate ? nvs_set_u16(h, "agate", g_set.audio_gate) : erase_key(h, "agate"));
+    TRY(g_set.antenna_ext ? nvs_set_u8(h, "antenna", 1) : erase_key(h, "antenna"));   /* kept by builds without the switch */
     TRY(nvs_commit(h));
 #undef TRY
 out:
@@ -328,6 +334,10 @@ void settings_dump(cmd_out_t *o)
     if (nvs_get_i32(h, "lat", &la) == ESP_OK && nvs_get_i32(h, "lon", &lo) == ESP_OK)
         out_printf(o, "  %-10s %ld %ld (1e-5 degrees)\n", "location", (long)la, (long)lo);
     dump_str(o, h, "hostname", "host");
+    uint16_t ag;
+    if (nvs_get_u16(h, "agate", &ag) == ESP_OK) out_printf(o, "  %-10s %u (rms)\n", "audio gate", ag);
+    uint8_t ant;
+    if (nvs_get_u8(h, "antenna", &ant) == ESP_OK) out_printf(o, "  %-10s %s\n", "antenna", ant == 1 ? "external" : "internal");
     nvs_close(h);
     nvs_stats_t st;
     if (nvs_get_stats(NULL, &st) == ESP_OK)
@@ -370,6 +380,9 @@ const char *settings_check_gpio(int gpio)
 {
     if (!GPIO_IS_VALID_OUTPUT_GPIO(gpio)) return "can't be an output on this chip";
     if (s_sys_reserved & BIT64(gpio)) return "is reserved (flash/PSRAM)";
+#if CONFIG_KTSN_XIAO_C6_ANTENNA
+    if (gpio == ANTENNA_EN_GPIO || gpio == ANTENNA_SEL_GPIO) return "is the antenna switch (XIAO C6 build)";
+#endif
     return NULL;
 }
 
@@ -377,6 +390,9 @@ const char *settings_check_gpio_in(int gpio)
 {
     if (!GPIO_IS_VALID_GPIO(gpio)) return "no such gpio on this chip";
     if (s_sys_reserved & BIT64(gpio)) return "is reserved (flash/PSRAM)";
+#if CONFIG_KTSN_XIAO_C6_ANTENNA
+    if (gpio == ANTENNA_EN_GPIO || gpio == ANTENNA_SEL_GPIO) return "is the antenna switch (XIAO C6 build)";
+#endif
     return NULL;
 }
 

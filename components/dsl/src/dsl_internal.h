@@ -3,6 +3,10 @@
 value_t dsl_eval_node(exec_ctx_t *c, const node_t *n);
 /* Evaluate (if needed) and coerce arg i of n. On failure c->err is set and V_NIL returned. */
 value_t dsl_eval_arg(exec_ctx_t *c, const node_t *n, uint8_t i);
+/* Entry i (0 <= i < l->n) of a list, evaluated now if it isn't a constant. On failure c->err is set and V_NIL returned. */
+value_t dsl_list_item(exec_ctx_t *c, const dsl_list_t *l, int i);
+/* Which of n entries time slot `slot` gets from a shuffle seeded by seed (list-pick, play-pick, play-library). */
+int     dsl_pick_index(int n, uint32_t seed, int64_t slot);
 bool    dsl_coerce(atype_t want, value_t in, value_t *out);
 const native_def_t *dsl_find_native(const char *name);
 const dsl_host_t *dsl_host(void);

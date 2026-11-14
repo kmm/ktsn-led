@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [esp32-2mb, esp32-2mb-nowifi, esp32-4mb, esp32c6, esp32c6-parlio, esp32c6-nowifi]
+        variant: [esp32-2mb, esp32-2mb-nowifi, esp32-4mb, esp32c6, esp32c6-parlio, esp32c6-xiao, esp32c6-xiao-parlio, esp32c6-nowifi]
     steps:
       - uses: actions/checkout@v5
       - name: Build

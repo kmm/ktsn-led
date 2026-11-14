@@ -1939,7 +1939,7 @@ static const char *fio_set(int n, uint16_t v) { fio[n] = n == 0 ? (v ? 256 : 0) 
 static void t_io(channel_t *ch)
 {
     char e[DSL_ERR_LEN];
-    static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, fio_find, fio_used, fio_get, fio_set, NULL, NULL, NULL, NULL, NULL };
+    static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, fio_find, fio_used, fio_get, fio_set, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
     CHECK(channel_set_source(ch, "(io-set 0 t)", e, sizeof e) != 0 && strstr(e, "only works in the automation program"));
     ch->ctx = DSL_CTX_AUTOMATION;
     dsl_set_host(NULL);
@@ -1979,7 +1979,7 @@ static void t_inputs(channel_t *ch)
 {
     char e[DSL_ERR_LEN];
     static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, fin_find, fin_used, fio_get, fio_set,
-                                     NULL, NULL, fin_mode, fin_get, fin_analog };
+                                     NULL, NULL, fin_mode, fin_get, fin_analog, NULL, NULL };
     dsl_set_host(NULL);
     CHECK(channel_set_source(ch, "(in button)", e, sizeof e) != 0 && strstr(e, "no input by that name"));   /* no host: no names */
     ch->perf.faults = 0;
@@ -2051,10 +2051,25 @@ static void t_inputs(channel_t *ch)
     dsl_set_host(NULL);
 }
 
+int dsl_pick_index(int n, uint32_t seed, int64_t slot);     /* dsl_internal.h */
+static const char *fh_playing_name[2];
+static const char *fh_playing(int ch) { return ch >= 0 && ch < 2 ? fh_playing_name[ch] : NULL; }
+static int fh_lib_match(const char *prefix, int k, char name[16])
+{
+    static const char *const names[] = { "chase", "party-a", "party-b", "party-c", "sunset" };   /* name order */
+    int count = 0;
+    for (int i = 0; i < 5; i++) {
+        if (strncmp(names[i], prefix, strlen(prefix))) continue;
+        if (count == k) snprintf(name, 16, "%s", names[i]);
+        count++;
+    }
+    return count;
+}
+
 static void t_automation(channel_t *ch)
 {
     char e[DSL_ERR_LEN];
-    static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+    static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
     /* render programs: automation natives are a compile error */
     CHECK(channel_set_source(ch, "(play 0 sunset)", e, sizeof e) != 0 && strstr(e, "only works in the automation program"));
     CHECK(channel_set_source(ch, "(fill (buf O) #FF0000) (set-intensity 0 0.5)", e, sizeof e) != 0);
@@ -2088,6 +2103,211 @@ static void t_automation(channel_t *ch)
     CHECK(run(ch, "(if (ge (env hour) 18) (play 0 sunset) (stop 0))", e) == 0);
     dsl_set_host(NULL);
     ch->ctx = DSL_CTX_RENDER;
+}
+
+/* O[0] after one run of src (a colour that encodes a list-pick result); 0xFFFFFFFF on an error or fault. */
+static uint32_t pick_px(channel_t *ch, const char *src, int px)
+{
+    char e[DSL_ERR_LEN];
+    uint32_t f0 = ch->perf.faults;
+    if (run(ch, src, e) != 0) { printf("  compile: %s\n", e); return 0xFFFFFFFF; }
+    if (ch->perf.faults != f0) { printf("  fault: %s\n", ch->perf.last_err); return 0xFFFFFFFF; }
+    return ch->buf[BUF_O][px];
+}
+static void set_clock(int year, int doy, int h, int m, int sec)
+{
+    env.year = (uint16_t)year; env.doy = (uint16_t)doy; env.hour = (uint8_t)h; env.minute = (uint8_t)m; env.second = (uint8_t)sec;
+}
+
+static bool holds(channel_t *ch, const char *defs, const char *cond);
+static void expect_err(channel_t *ch, const char *src, const char *want);
+
+static void t_lists(channel_t *ch)
+{
+    char e[DSL_ERR_LEN];
+    /* entries of each type, list-len, list-nth with negatives */
+    CHECK(holds(ch, "(def l (list 10 20 30))", "(and (eq (list-len l) 3) (eq (list-nth l 0) 10) (eq (list-nth l -1) 30) (eq (list-nth l (- 3 2)) 20))"));
+    CHECK(holds(ch, "", "(eq (list-nth (list 1.5 2.5) 1) 2.5)"));
+    CHECK(holds(ch, "", "(eq (list-nth (list #FF0000 #00FF00) -1) #00FF00)"));
+    CHECK(holds(ch, "", "(eq (list-nth (list \"a\" \"bc\") 1) \"bc\")"));
+    CHECK(holds(ch, "", "(list-nth (list nil t) 1)"));
+    CHECK(holds(ch, "(def pals (list (slice (buf G0) 0 3) (slice (buf G1) 0 2 -1)))", "(eq (list-nth pals 1) (slice (buf G1) 0 2 -1))"));
+    CHECK(holds(ch, "", "(eq (list-len (list 7)) 1)"));
+    /* palettes picked from a list feed fill-grad */
+    CHECK(run(ch, "(set (buf G2) 0 #FF0000 #FF0000) (set (buf G3) 0 #0000FF #0000FF) (def pals (list (slice (buf G2) 0 2) (slice (buf G3) 0 2))) (fill-grad (buf O) (list-nth pals 1))", e) == 0);
+    CHECK(ch->buf[BUF_O][0] == 0x0000FF && ch->buf[BUF_O][9] == 0x0000FF);
+    /* entries are evaluated when picked: only the picked one, with variables as they are then */
+    CHECK(holds(ch, "(def x 1) (def l (list x 5)) (def x 2)", "(eq (list-nth l 0) 2)"));
+    CHECK(run(ch, "(fill (buf X) #000000) (fill (buf Y) #000000) (def b (list-nth (list (fill (buf X) #FF0000) (fill (buf Y) #00FF00)) 1))", e) == 0);
+    CHECK(ch->buf[BUF_X][0] == 0 && ch->buf[BUF_Y][0] == 0x00FF00);
+    /* in a function, with its parameters */
+    CHECK(holds(ch, "(defn f (i:int) (def l (list 10 20 30 i)) (list-nth l i))", "(and (eq (f 2) 30) (eq (f 3) 3))"));
+    CHECK(holds(ch, "(def l (list 1 2 3))", "(eq (list-nth l 2) 3)"));
+    /* longer than the argument limit; the limit itself */
+    char src[2400];
+    int k = snprintf(src, sizeof src, "(def l (list");
+    for (int i = 0; i < 100; i++) k += snprintf(src + k, sizeof src - (size_t)k, " %d", i * 3);
+    snprintf(src + k, sizeof src - (size_t)k, "))");
+    CHECK(holds(ch, src, "(and (eq (list-len l) 100) (eq (list-nth l 99) 297) (eq (list-nth l -100) 0))"));
+    char *big = malloc(4000);
+    k = snprintf(big, 4000, "(def l (list");
+    for (int i = 0; i < 256; i++) k += snprintf(big + k, 4000 - (size_t)k, " %d", i);
+    snprintf(big + k, 4000 - (size_t)k, "))");
+    expect_err(ch, big, "too many list entries (max 255)");
+    free(big);
+    /* faults: outside the list */
+    uint32_t f0 = ch->perf.faults;
+    CHECK(run(ch, "(def l (list 1 2)) (def y (list-nth l 2))", e) == 0 && ch->perf.faults == f0 + 1);
+    CHECK(run(ch, "(def l (list 1 2)) (def y (list-nth l -3))", e) == 0 && ch->perf.faults == f0 + 2);
+    /* compile errors */
+    expect_err(ch, "(def l (list 1 \"a\"))", "list entries must all be one type: this is string, the first is int");
+    expect_err(ch, "(def l (list 1 1.5))", "this is number, the first is int");
+    expect_err(ch, "(def l (list))", "at least one entry");
+    expect_err(ch, "(list 1 2)", "a list goes to");
+    expect_err(ch, "(fill (list (buf O)) #FF0000)", "a list goes to");
+    expect_err(ch, "(def l (if t (list 1) (list 2)))", "a list goes to");
+    expect_err(ch, "(def l (list 1)) (def m l)", "'l' is a list");
+    expect_err(ch, "(def l (list 1)) (def l (list 2))", "a list can't change");
+    expect_err(ch, "(def l 1) (def l (list 2))", "already defined");
+    expect_err(ch, "(def l (list 1)) (def l 2)", "a list can't change");
+    expect_err(ch, "(def l (list (list 1)))", "can't hold lists");
+    expect_err(ch, "(def l (list (if t 1)))", "this returns nothing");
+    expect_err(ch, "(defn f () (list 1 2))", "a list goes to");
+    expect_err(ch, "(def n (list-len 5))", "expected a list");
+    expect_err(ch, "(def n (list-nth (list 1) _))", "'_' can only stand in");
+    expect_err(ch, "(def p (list-pick (list 1 2) 0))", "at least 1");
+    expect_err(ch, "(def l (list 1 2)) (defn f (x:int) (list-len l))", "unknown name 'l'");     /* not visible in a defn */
+    /* a program's own function named list (written before lists existed) keeps working, and so do len / pick / nth */
+    CHECK(holds(ch, "(defn list (x:int) (* x 2))", "(eq (list 3) 6)"));
+    CHECK(holds(ch, "(defn nth (x:int) x) (defn len (x:int) x)", "(eq (+ (nth 1) (len 2)) 3)"));
+
+    /* the shuffle: every entry once per round, never twice in a row (also across rounds), seeds differ */
+    static const int ns[] = { 2, 3, 7, 16, 255 };
+    for (size_t t = 0; t < sizeof ns / sizeof ns[0]; t++) {
+        int n = ns[t], prev = -1, rounds_ok = 1, repeats = 0;
+        for (int r = 0; r < 40; r++) {
+            uint8_t seen[255] = { 0 };
+            for (int p = 0; p < n; p++) {
+                int v = dsl_pick_index(n, 0xC0FFEE + (uint32_t)n, (int64_t)r * n + p);
+                if (v < 0 || v >= n || seen[v]++) rounds_ok = 0;
+                if (v == prev) repeats++;
+                prev = v;
+            }
+        }
+        CHECK(rounds_ok && repeats == 0);
+    }
+    CHECK(dsl_pick_index(1, 5, 12345) == 0 && dsl_pick_index(5, 5, -1) == 0);
+    int differ = 0;
+    for (int s2 = 0; s2 < 20; s2++) differ += dsl_pick_index(7, 1, s2) != dsl_pick_index(7, 2, s2);
+    CHECK(differ >= 10);
+
+    /* list-pick: the same within a period, changes with the period, per channel and per list */
+    const char *pk = "(fill (buf O) (list-pick (list #000000 #000001 #000002 #000003 #000004 #000005 #000006) 60))";
+    set_clock(2026, 200, 12, 30, 0);
+    uint32_t a0 = pick_px(ch, pk, 0);
+    set_clock(2026, 200, 12, 30, 59);
+    CHECK(pick_px(ch, pk, 0) == a0 && a0 <= 6);
+    uint32_t seq0[14], seq1[14];
+    int changes = 0;
+    for (int m = 0; m < 14; m++) {
+        set_clock(2026, 200, 13, m, 7);
+        seq0[m] = pick_px(ch, pk, 0);
+        if (m && seq0[m] != seq0[m - 1]) changes++;
+    }
+    CHECK(changes == 13);                                  /* a new entry every minute, never the same twice */
+    ch->id = 1;
+    int other = 0;
+    for (int m = 0; m < 14; m++) { set_clock(2026, 200, 13, m, 7); seq1[m] = pick_px(ch, pk, 0); other += seq1[m] != seq0[m]; }
+    ch->id = 0;
+    CHECK(other >= 5);                                     /* another channel picks differently */
+    const char *two = "(def a (list #000000 #000001 #000002 #000003 #000004 #000005 #000006)) (def b (list #000000 #000001 #000002 #000003 #000004 #000005 #000006))"
+                      " (set (buf O) 0 (list-pick a 60) (list-pick b 60))";
+    other = 0;
+    for (int m = 0; m < 14; m++) { set_clock(2026, 200, 13, m, 7); uint32_t x = pick_px(ch, two, 0), y = ch->buf[BUF_O][1]; other += x != y; }
+    CHECK(other >= 5);                                     /* two lists in one program differ */
+    set_clock(2027, 1, 0, 0, 0);                           /* a later year: still fine */
+    CHECK(pick_px(ch, pk, 0) <= 6);
+    f0 = ch->perf.faults;
+    CHECK(run(ch, "(def p (list-pick (list 1 2) (- (env hour) (env hour))))", e) == 0 && ch->perf.faults == f0 + 1);   /* period 0 at run time */
+    memset(&env, 0, sizeof env);
+    env.intensity = 256; env.beatms = DSL_BEATMS_NONE;
+}
+
+static void t_play_pick(channel_t *ch)
+{
+    char e[DSL_ERR_LEN];
+    static const dsl_host_t host = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                                     fh_playing, fh_lib_match };
+    ch->ctx = DSL_CTX_AUTOMATION;
+    dsl_set_host(&host);
+    memset(&fh, 0, sizeof fh);
+    /* play takes strings too, made at run time or not */
+    CHECK(run(ch, "(play 0 \"chase\")", e) == 0 && fh.plays == 1 && !strcmp(fh.last_name, "chase"));
+    CHECK(run(ch, "(play 1 (str-cat \"sun\" \"set\"))", e) == 0 && fh.plays == 2 && !strcmp(fh.last_name, "sunset") && fh.last_ch == 1);
+    uint32_t f0 = ch->perf.faults;
+    CHECK(run(ch, "(play 0 (str-cat \"No\" \"pe\"))", e) == 0 && ch->perf.faults == f0 + 1 && fh.plays == 2);
+    CHECK(run(ch, "(def fire 1) (play 0 chase)", e) == 0 && fh.plays == 3);          /* a bare name is never a variable */
+    expect_err(ch, "(play 0 \"nosuch\")", "no library program");
+    expect_err(ch, "(play 0 \"Big\")", "lower case");
+    /* play-pick: names checked when it compiles, the pick follows the period */
+    expect_err(ch, "(play-pick 0 (list \"sunset\" \"nosuch\"))", "no library program");
+    expect_err(ch, "(play-pick 0 (list 1 2))", "list of library program names");
+    expect_err(ch, "(play-pick 0 (list \"chase\") 0)", "at least 1");
+    set_clock(2026, 100, 8, 0, 0);
+    CHECK(run(ch, "(play-pick 0 (list \"sunset\" \"chase\" \"broken\") 60)", e) == 0);
+    char first[16];
+    snprintf(first, sizeof first, "%s", fh.last_name);
+    set_clock(2026, 100, 8, 0, 40);
+    CHECK(run(ch, "(play-pick 0 (list \"sunset\" \"chase\" \"broken\") 60)", e) == 0 && !strcmp(first, fh.last_name));
+    int differ = 0;
+    for (int m = 0; m < 12; m++) {
+        char a[16];
+        set_clock(2026, 100, 9, m, 0);
+        run(ch, "(def l (list \"sunset\" \"chase\" \"broken\")) (play-pick 0 l 60)", e);
+        snprintf(a, sizeof a, "%s", fh.last_name);
+        run(ch, "(def l (list \"sunset\" \"chase\" \"broken\")) (play-pick 1 l 60)", e);
+        differ += strcmp(a, fh.last_name) != 0;
+    }
+    CHECK(differ >= 4);                                    /* channels sharing a list change differently */
+    /* without a period: keep what runs if it is in the list, else play one */
+    fh_playing_name[0] = "chase";
+    int p0 = fh.plays;
+    CHECK(run(ch, "(play-pick 0 (list \"sunset\" \"chase\"))", e) == 0 && fh.plays == p0);
+    fh_playing_name[0] = "other";
+    CHECK(run(ch, "(play-pick 0 (list \"sunset\" \"chase\"))", e) == 0 && fh.plays == p0 + 1 && (!strcmp(fh.last_name, "sunset") || !strcmp(fh.last_name, "chase")));
+    fh_playing_name[0] = NULL;
+    CHECK(run(ch, "(play-pick 0 (list \"sunset\"))", e) == 0 && fh.plays == p0 + 2 && !strcmp(fh.last_name, "sunset"));
+    /* play-library: by name prefix, from the library when it runs */
+    int seen[3] = { 0 };
+    for (int m = 0; m < 9; m++) {
+        set_clock(2026, 100, 10, m, 0);
+        CHECK(run(ch, "(play-library 0 \"party-\" 60)", e) == 0 && !strncmp(fh.last_name, "party-", 6));
+        seen[fh.last_name[6] - 'a']++;
+    }
+    CHECK(seen[0] == 3 && seen[1] == 3 && seen[2] == 3);   /* three rounds of three: each once per round */
+    fh_playing_name[0] = "party-b";
+    p0 = fh.plays;
+    CHECK(run(ch, "(play-library 0 \"party\")", e) == 0 && fh.plays == p0);
+    fh_playing_name[0] = "chase";
+    CHECK(run(ch, "(play-library 0 \"party\")", e) == 0 && fh.plays == p0 + 1 && !strncmp(fh.last_name, "party-", 6));
+    fh_playing_name[0] = NULL;
+    CHECK(run(ch, "(play-library 0 \"\" 60)", e) == 0);    /* "" = the whole library */
+    f0 = ch->perf.faults;
+    CHECK(run(ch, "(play-library 0 \"zzz\")", e) == 0 && ch->perf.faults == f0 + 1);
+    expect_err(ch, "(play-library 0 \"Party\")", "lower case");
+    expect_err(ch, "(play-library 0 \"party\" 0)", "at least 1");
+    static const dsl_host_t bare = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+    dsl_set_host(&bare);
+    f0 = ch->perf.faults;
+    CHECK(run(ch, "(play-library 0 \"party\")", e) == 0 && ch->perf.faults == f0 + 1);   /* no lib_match: a fault */
+    CHECK(run(ch, "(play-pick 0 (list \"chase\"))", e) == 0 && ch->perf.faults == f0 + 1);  /* no playing hook: plays */
+    /* not in channel programs */
+    dsl_set_host(NULL);
+    ch->ctx = DSL_CTX_RENDER;
+    expect_err(ch, "(play-pick 0 (list \"chase\") 60)", "only works in the automation program");
+    expect_err(ch, "(play-library 0 \"party\")", "only works in the automation program");
+    memset(&env, 0, sizeof env);
+    env.intensity = 256; env.beatms = DSL_BEATMS_NONE;
 }
 
 /* Run `defs` then a boolean `cond`: O[0] turns green when it holds. */
@@ -2621,13 +2841,76 @@ static void t_audio(void)
         if (a.beats > 2) printf("audio: %u beats in steady noise\n", a.beats);
         CHECK(a.beats <= 2);
     }
+
+    /* rms: a 300-count sine is ~212 */
+    {
+        audio_t a; audio_init(&a);
+        uint32_t t = 0;
+        t_track(&a, 0.1, 300, 0, 1, 0, &t);
+        CHECK(a.rms >= 205 && a.rms <= 218);
+    }
+
+    /* learning a gate: the 90th percentile + ~3.5 dB, so a few clicks don't count */
+    {
+        uint16_t r[100];
+        for (int i = 0; i < 100; i++) r[i] = i % 10 == 3 ? 100 : 10;        /* 10 clicks among 90 quiet blocks */
+        CHECK(audio_gate_learn(r, 100) == 15);
+        CHECK(r[0] == 10 && r[99] == 100);                                   /* sorted */
+        r[0] = 0; CHECK(audio_gate_learn(r, 1) == 1);
+        CHECK(audio_gate_learn(r, 0) == 0);
+        r[0] = 4000; CHECK(audio_gate_learn(r, 1) == AUDIO_GATE_MAX);
+    }
+
+    /* room noise (rms ~17, as a MAX9814 at 40 dB): without a gate the automatic gain turns it up to fill the range;
+     * with a gate learned from it, it stays dark and makes no beats; sound above the gate shows, dim just above it */
+    {
+        audio_t a; audio_init(&a);
+        uint32_t t = 0;
+        t_track(&a, 10, 30, 0, 0, 1, &t);
+        uint32_t lv = 0;
+        for (int k = 0; k < 20; k++) { t_track(&a, 0.032, 30, 0, 0, 1, &t); if (a.level > lv) lv = a.level; }
+        CHECK(lv > AUDIO_ONE / 2);                                           /* the problem */
+
+        audio_init(&a); t = 0;
+        uint16_t r[156];
+        for (int k = 0; k < 156; k++) { t_track(&a, 0.032, 30, 0, 0, 1, &t); r[k] = a.rms; }
+        a.gate = audio_gate_learn(r, 156);
+        CHECK(a.gate >= 22 && a.gate <= 30);
+        t_track(&a, 0.3, 30, 0, 0, 1, &t);                                  /* what was showing falls away */
+        uint32_t b0 = a.beats; lv = 0;
+        for (int k = 0; k < 300; k++) { t_track(&a, 0.032, 30, 0, 0, 1, &t); if (a.level > lv) lv = a.level; if (a.band[0] > lv) lv = a.band[0]; }
+        if (lv || a.beats != b0) printf("audio: gated noise: gate %u, level %u, %u beats\n", a.gate, lv, a.beats - b0);
+        CHECK(lv == 0 && a.beats == b0);
+        /* a tone ~3 dB over the gate (and the noise): dim; ~15 dB over: full */
+        t_track(&a, 3, 30, 0, 1.15, 1, &t);
+        if (!(a.level > 0 && a.level < AUDIO_ONE / 2)) printf("audio: 3 dB over the gate: level %u\n", a.level);
+        CHECK(a.level > 0 && a.level < AUDIO_ONE / 2);
+        t_track(&a, 3, 30, 0, 6, 1, &t);
+        CHECK(a.level > AUDIO_ONE * 9 / 10);
+        /* then quiet again: dark, however long */
+        t_track(&a, 0.5, 30, 0, 0, 1, &t);
+        lv = 0;
+        for (int k = 0; k < 300; k++) { t_track(&a, 0.032, 30, 0, 0, 1, &t); if (a.level > lv) lv = a.level; }
+        CHECK(lv == 0);
+    }
+
+    /* kicks well over a gate still beat every time */
+    {
+        audio_t a; audio_init(&a);
+        a.gate = 25;
+        uint32_t t = 0;
+        t_track(&a, 2, 300, 500, 0.4, 0.1, &t);
+        uint32_t b0 = a.beats;
+        t_track(&a, 10, 300, 500, 0.4, 0.1, &t);
+        CHECK(a.beats - b0 >= 19 && a.beats - b0 <= 21);
+    }
 }
 
 int main(void)
 {
     CHECK(globals_init(&globals, 10) == 0);
     with_channel(t_fill); with_channel(t_scale_and_persistence); with_channel(t_invert); with_channel(t_nesting_globals);
-    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); t_astro(); t_audio(); with_channel(t_errors); with_channel(t_swap_atomic);
+    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); with_channel(t_lists); with_channel(t_play_pick); t_astro(); t_audio(); with_channel(t_errors); with_channel(t_swap_atomic);
     t_arena(); t_ws_parallel(); t_gamma(); t_dither(); t_wire(); t_wire_white(); t_wire_wmode(); t_fader(); t_intensity16(); t_px_scale_exhaustive(); t_blend_math(); t_stats();
     for (int i = 0; i < DSL_NUM_GLOBALS; i++) free(globals.buf[i]);
     printf("%d checks, %d failed\n", g_checks, g_fail);

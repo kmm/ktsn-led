@@ -27,8 +27,8 @@ export interface BoardStatus {
    *  averaged), ok = set up without errors; mode missing on firmware from before inputs. */
   io?: { n: number; name: string; mode?: BoardIo['mode']; value: number; ok: boolean }[];
   /** The audio input's analysis (null: none; missing on firmware from before 0.23.0): bands/level 0..1, beatms 2147483647 =
-   *  no beat yet, swing in ADC counts, analysis time per 32 ms block. */
-  audio?: { n: number; bands: number[]; level: number; beats: number; beatms: number; swing: number; adc_hz: number;
+   *  no beat yet, swing and rms (from 0.26.0) in ADC counts, analysis time per 32 ms block. */
+  audio?: { n: number; bands: number[]; level: number; beats: number; beatms: number; swing: number; rms?: number; adc_hz: number;
             blocks: number; us_avg: number; us_max: number; overflows: number } | null;
   heap_free: number;
 }
@@ -88,6 +88,10 @@ export interface BoardConfig {
   /** Where the board is, for env sunrise etc. (null = not set); missing on firmware from before it. */
   loc?: { lat: number; lon: number } | null;
   wifi: { ssid: string; password_set: boolean };
+  /** Seeed XIAO ESP32-C6 builds only (esp32c6-xiao*): which antenna the RF switch uses. Missing elsewhere. */
+  antenna?: 'internal' | 'external';
+  /** The audio input's noise gate, RMS in ADC counts (0 = off); missing on firmware from before 0.26.0. */
+  audio_gate?: number;
   token_set: boolean;
   reboot_needed: boolean;
 }
@@ -98,6 +102,8 @@ export interface ConfigPatch {
   output?: { refresh?: number; parallel?: boolean };
   tz?: string; ntp?: string; hostname?: string;
   loc?: { lat: number; lon: number } | null;
+  antenna?: 'internal' | 'external';
+  audio_gate?: number;
   autoexec?: string | null;
   automation?: string | null;
   automation_every?: number;

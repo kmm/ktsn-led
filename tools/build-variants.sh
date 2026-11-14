@@ -14,6 +14,8 @@ esp32-2mb-nowifi|build-nowifi|esp32|sdkconfig.nowifi
 esp32-4mb|build-4mb|esp32|sdkconfig.flash4mb
 esp32c6|build-c6|esp32c6|sdkconfig.flash4mb;sdkconfig.usbjtag
 esp32c6-parlio|build-c6p|esp32c6|sdkconfig.flash4mb;sdkconfig.usbjtag;sdkconfig.parlio
+esp32c6-xiao|build-c6x|esp32c6|sdkconfig.flash4mb;sdkconfig.usbjtag;sdkconfig.xiaoc6
+esp32c6-xiao-parlio|build-c6xp|esp32c6|sdkconfig.flash4mb;sdkconfig.usbjtag;sdkconfig.parlio;sdkconfig.xiaoc6
 esp32c6-nowifi|build-c6-nowifi|esp32c6|sdkconfig.flash4mb;sdkconfig.usbjtag;sdkconfig.nowifi'
 
 if [ "$1" = "--list" ]; then echo "$VARIANTS" | cut -d'|' -f1; exit 0; fi

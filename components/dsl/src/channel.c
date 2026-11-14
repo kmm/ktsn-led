@@ -71,6 +71,15 @@ value_t dsl_eval_arg(exec_ctx_t *c, const node_t *n, uint8_t i)
     return out;
 }
 
+value_t dsl_list_item(exec_ctx_t *c, const dsl_list_t *l, int i)
+{
+    const arg_t *a = &l->items[i];
+    if (!a->node) return a->val;
+    value_t v = dsl_eval_node(c, a->node);
+    if (c->err) v.type = V_NIL;
+    return v;
+}
+
 value_t dsl_eval_node(exec_ctx_t *c, const node_t *n)
 {
     value_t nil = { .type = V_NIL };

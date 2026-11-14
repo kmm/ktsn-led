@@ -72,6 +72,17 @@ menu "KTSN LED"
             30 s) or the bootloader goes back to the previous one. Token-protected like the rest of the API; the
             image must be a KTSN LED build for this chip. Not available on 2 MB boards (the image doesn't fit twice).
 
+    config KTSN_XIAO_C6_ANTENNA
+        bool "Seeed XIAO ESP32-C6 antenna switch (GPIO3 / GPIO14)"
+        depends on KTSN_WIFI && IDF_TARGET_ESP32C6
+        default n
+        help
+            The XIAO ESP32-C6 has an RF switch between its ceramic antenna and the U.FL connector: GPIO3 low
+            powers the switch, GPIO14 picks the antenna (low = built-in, high = external). Adds the saved
+            `antenna internal|external` setting (console, API, IDE), applied at boot before WiFi starts and at
+            once when changed. GPIO3 and GPIO14 are then reserved (not on the XIAO's pins anyway). Only for
+            that board: on another C6 board these pins may be wired to something else.
+
     choice KTSN_OUTPUT
         prompt "LED output driver"
         default KTSN_OUTPUT_RMT

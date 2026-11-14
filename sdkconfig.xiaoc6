@@ -1,0 +1,3 @@
+# Preset: Seeed XIAO ESP32-C6 board extras: the RF switch between the built-in and an external antenna
+# (GPIO3 powers it, GPIO14 selects; `antenna internal|external`). Use with sdkconfig.flash4mb and sdkconfig.usbjtag.
+CONFIG_KTSN_XIAO_C6_ANTENNA=y

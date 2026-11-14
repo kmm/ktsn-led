@@ -33,6 +33,7 @@ Presets can be combined; defaults only apply to a fresh `sdkconfig`, so build a 
 | `sdkconfig.flash4mb`| 4 MB flash, two 1.9 MB app slots for network updates + rollback (`partitions_4mb.csv`) |
 | `sdkconfig.usbjtag` | console on the chip's own USB port (XIAO C6/C3, most C6/S3 boards) |
 | `sdkconfig.parlio`  | C6: drive all strings with one parallel DMA transfer (PARLIO) instead of RMT |
+| `sdkconfig.xiaoc6`  | Seeed XIAO ESP32-C6 only: its antenna switch (`antenna internal\|external`; uses GPIO3 and GPIO14) |
 
 Seeed XIAO ESP32-C6 (4 MB flash, native USB), WiFi build:
 
@@ -116,8 +117,10 @@ debounced) or `(analog knob)` (0..1, averaged). The C6 build starts with GPIO 19
     io config 5 1 audio name=mic            audio input (experimental): an analog microphone module (e.g. MAX9814,
                                             MAX4466) on an ADC1 pin, one at most; programs read (env band0) .. band7,
                                             level, beats, beatms
-    audio                    the audio analysis: sample rate, time per block, bands, level, beats, swing
+    audio                    the audio analysis: sample rate, time per block, bands, level, beats, swing, rms, gate
     audio watch 20           print bands, level and beats 4 times a second for 20 s (`audio reset` clears timings)
+    audio gate learn         listen to the quiet room for 5 s (or `learn 10`) and set the noise gate just above it;
+                             room noise below the gate stays dark (`audio gate 30` sets it by hand, `off`; save keeps it)
     audio bench              time the analysis on a built-in test signal (no audio input needed)
     io config 2 off          remove it (its pin is let go)
 
@@ -150,6 +153,7 @@ Settings change immediately in RAM; `save` stores them in flash so they survive 
     save | config | config erase | reboot
     token <secret>           enable network access (token off disables it again)
     hostname <name>          network name, reachable as <name>.local (default ktsn-led.local)
+    antenna external         XIAO C6 builds: use the U.FL antenna (antenna internal: the built-in one); at once
 
 Gamma and dither: gamma correction maps each channel's output through `(in/255)^gamma`, so fades look even to the eye
 but dark values fall into few 8-bit steps. Dither keeps 1..4 more bits: each pixel cycles through 2^bits frames whose
@@ -207,7 +211,8 @@ GPIO slots: `PATCH /api/config` with `{"io": {"2": {"gpio": 4, "mode": "pwm", "f
 `debounce` ms, `trigger`), `analog` and `audio`. `{"io_set": {"pump": true, "2": 0.4}}` switches or dims outputs by number or
 name. `GET /api/config` → `io` lists them, `GET /api/status` → `io` gives each one's mode and value (0..1; inputs 0 or
 1, analog the latest 16 readings averaged, audio the level); `audio` is the audio input's analysis (`bands`, `level`,
-`beats`, `beatms`, `swing`, `us_avg` / `us_max` per block, `overflows`) or null.
+`beats`, `beatms`, `swing`, `rms`, `us_avg` / `us_max` per block, `overflows`) or null. `audio_gate` in the config is the
+noise gate (rms in ADC counts, 0 = off; PATCH sets it).
 
 `GET /api/lib` lists the library (`{programs: [{name, size}], used, total}`), `GET /api/lib/<name>` gives
 `{name, src}`, `PUT /api/lib/<name>` stores the body (compiled first), `DELETE /api/lib/<name>` removes it (409 with
@@ -271,6 +276,10 @@ Programs sent over HTTP may be up to 3999 characters, span several lines and con
     (str-num n [width] [decimals] [zero])       number as text, padded         -> string
     (str-time "%H:%M")                          the clock as text (H k I l M S p Y y m d e j %) -> string
     (str-cat a b ...) (str-sub s [start] [end]) (str-len s)   join / part / length  -> string, string, int
+    (list a b ...)                              up to 255 values of one type (def it, or pass it) -> list
+    (list-len l) (list-nth l i)                 entries / entry i (negative from the end)
+    (list-pick l period)                        the entry for now: a new one every period seconds, shuffled
+                                                (each once per round, never twice in a row; differs per channel)
     (seg7 <buf> <num|text> [layout] [hstride] [vstride] [digits])  7-segment display mask -> buf
     (seg9 <buf> <num|text> [layout] [hstride] [vstride] [digits])  7 + centre verticals j m -> buf
     (seg14 <buf> <num|text> [layout] [hs] [vs] [ds] [gs] [digits])  14-segment (a..f g1 g2 h j k l m n) -> buf
@@ -278,7 +287,10 @@ Programs sent over HTTP may be up to 3999 characters, span several lines and con
     (analog name|n [samples])                   an analog input, the latest 1..256 readings (1/ms, default 16)
                                                 averaged -> number 0..1
     automation program only:
-    (play ch name) (stop ch)                    library program on a channel / dark
+    (play ch name) (stop ch)                    library program on a channel / dark (name bare or a string)
+    (play-pick ch (list "a" "b" ...) [period])  one of the list's programs, a new one every period (shuffled);
+                                                without a period: keep what runs if it is in the list
+    (play-library ch "prefix" [period])         the same over the library programs whose names start with prefix
     (intensity [ch]) (set-intensity ch|_ v [fade s])  read / set intensity 0..1, fading
     (io-set out|name t|nil|0..1) (io out|name)  switch / dim a GPIO output; read it back (0..1)
 Ranges work the same everywhere: `[start] [end]` are absolute indices, `end` is exclusive, defaults are the whole
@@ -331,7 +343,9 @@ dot going round once a minute.
 Decimals are converted at compile time (Q16.16, then Q8 for scale args); no floats at run time.
 Sound (experimental), with an audio input: `(env band0)` .. `(env band7)` are how loud each of 8 bands is, about an
 octave each from 31 Hz (kick drum) to 4 kHz, and `(env level)` the overall loudness, all 0..1 with an automatic gain,
-updated every 32 ms. `(env beats)` counts beats (sudden bass), `(env beatms)` is the ms since the latest (2147483647
+updated every 32 ms; sound below the noise gate (`audio gate learn` on the console) counts as silence. With a
+MAX9814, its 40 dB gain setting keeps room noise well below quiet music (60 dB turns the noise up nearly as much).
+`(env beats)` counts beats (sudden bass), `(env beatms)` is the ms since the latest (2147483647
 before the first or without an audio input, so it reads as long ago), so `(if (lt (env beatms) 80) (fill (buf O) #FFFFFF))` flashes on every beat and
 `(fill (buf O) #FF0000 0 (round (* (env band0) (env npix))))` is a bass meter.
 ```

@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include "antenna.h"
 #include "app.h"
 #include "cmd.h"
 #include "config.h"
@@ -811,6 +812,20 @@ static int cmd_hostname(cmd_out_t *o, int argc, char **argv)
 }
 #endif
 
+#if CONFIG_KTSN_XIAO_C6_ANTENNA
+/* antenna | antenna internal|external */
+static int cmd_antenna(cmd_out_t *o, int argc, char **argv)
+{
+    if (argc == 2) {
+        if (strcmp(argv[1], "internal") && strcmp(argv[1], "external")) { out_puts(o, "antenna internal | antenna external"); return 1; }
+        g_set.antenna_ext = !strcmp(argv[1], "external");
+        antenna_apply();
+    }
+    out_printf(o, "antenna %s%s\n", g_set.antenna_ext ? "external" : "internal", argc == 2 ? " (at once; save to persist)" : "");
+    return 0;
+}
+#endif
+
 static void print_deg(cmd_out_t *o, int32_t v)      /* 1e-5 degrees */
 {
     long a = labs((long)v);
@@ -838,7 +853,7 @@ static void audio_line(cmd_out_t *o, const io_audio_stat_t *st, uint32_t *last_b
     out_printf(o, "bands %s  level %lu%%  beats %lu%s", bands, (unsigned long)((st->level * 100u + AUDIO_ONE / 2) / AUDIO_ONE),
                (unsigned long)st->beats, last_beats && st->beats != *last_beats ? " *" : "  ");
     if (ago != DSL_BEATMS_NONE) out_printf(o, " (%ld ms ago)", (long)ago);
-    out_printf(o, "  swing %u\n", st->swing);
+    out_printf(o, "  swing %u  rms %u%s\n", st->swing, st->rms, st->gate && st->rms < st->gate ? " (gated)" : "");
     if (last_beats) *last_beats = st->beats;
 }
 
@@ -880,11 +895,54 @@ static int audio_bench(cmd_out_t *o)
     return 0;
 }
 
+/* audio gate: the noise gate (RMS in ADC counts), set by hand or learned from a quiet room. Applies at once. */
+static int audio_gate_cmd(cmd_out_t *o, int argc, char **argv, bool have_input)
+{
+    if (argc == 2) {
+        if (g_set.audio_gate) out_printf(o, "noise gate: rms %u\n", g_set.audio_gate);
+        else out_puts(o, "noise gate: off");
+        return 0;
+    }
+    if (!strcmp(argv[2], "learn")) {
+        long secs = argc >= 4 ? strtol(argv[3], NULL, 10) : 5;
+        if (argc > 4 || secs < 1 || secs > 30) { out_puts(o, "usage: audio gate learn [1..30 s]"); return 1; }
+        if (!have_input) { out_puts(o, "no audio input (io config <n> <gpio> audio)"); return 1; }
+        int cap = (int)(secs * 1000 / AUDIO_HOP_MS) + 4;
+        uint16_t *buf = malloc((size_t)cap * sizeof *buf);
+        if (!buf) { out_puts(o, "out of memory"); return 1; }
+        out_printf(o, "listening for %ld s: keep the room quiet...\n", secs);
+        cmd_unlock();
+        io_audio_learn_begin(buf, cap);
+        vTaskDelay(pdMS_TO_TICKS(secs * 1000));
+        int n = io_audio_learn_end();
+        cmd_lock();
+        if (n < 8) { free(buf); out_puts(o, "too few blocks analysed (is the input working? see: audio)"); return 1; }
+        uint16_t g = audio_gate_learn(buf, n);           /* sorts buf */
+        out_printf(o, "noise rms %u..%u (median %u) over %d blocks: gate rms %u (save to persist)\n",
+                   buf[0], buf[n - 1], buf[n / 2], n, g);
+        free(buf);
+        g_set.audio_gate = g;
+        return 0;
+    }
+    long g;
+    if (!strcmp(argv[2], "off")) g = 0;
+    else {
+        char *end;
+        g = strtol(argv[2], &end, 10);
+        if (!argv[2][0] || *end || g < 0 || g > AUDIO_GATE_MAX) { out_printf(o, "gate is an rms of 0..%d (ADC counts), off, or learn [s]\n", AUDIO_GATE_MAX); return 1; }
+    }
+    if (argc > 3) { out_puts(o, "usage: audio gate [<rms> | off | learn [s]]"); return 1; }
+    g_set.audio_gate = (uint16_t)g;
+    out_puts(o, "ok (save to persist)");
+    return 0;
+}
+
 static int cmd_audio(cmd_out_t *o, int argc, char **argv)
 {
     if (argc >= 2 && !strcmp(argv[1], "bench")) return audio_bench(o);
     io_audio_stat_t st;
     io_audio_stat(&st);
+    if (argc >= 2 && !strcmp(argv[1], "gate")) return audio_gate_cmd(o, argc, argv, st.slot >= 0);
     if (st.slot < 0) { out_puts(o, "no audio input (io config <n> <gpio> audio [name=x]); audio bench works without one"); return 1; }
     if (argc >= 2 && !strcmp(argv[1], "reset")) { io_audio_stat_reset(); out_puts(o, "timing and drop counts reset"); return 0; }
     if (argc >= 2 && !strcmp(argv[1], "watch")) {
@@ -901,7 +959,7 @@ static int cmd_audio(cmd_out_t *o, int argc, char **argv)
         cmd_lock();
         return 0;
     }
-    if (argc >= 2) { out_puts(o, "usage: audio [watch [s] | reset | bench]"); return 1; }
+    if (argc >= 2) { out_puts(o, "usage: audio [watch [s] | reset | bench | gate [<rms> | off | learn [s]]]"); return 1; }
     const io_cfg_t *c = &g_set.io[st.slot];
     out_printf(o, "audio input %d%s%s on gpio %d: %d Hz, each sample the average of %lu conversions (adc %lu Hz in all)\n",
                st.slot, c->name[0] ? " " : "", c->name, c->gpio, AUDIO_RATE, (unsigned long)st.per_sample, (unsigned long)st.adc_hz);
@@ -910,7 +968,10 @@ static int cmd_audio(cmd_out_t *o, int argc, char **argv)
                (unsigned long)(st.us_avg / (AUDIO_HOP_MS * 10)), (unsigned long)(st.us_avg * 10 / AUDIO_HOP_MS % 100),
                (unsigned long)st.dropped);
     audio_line(o, &st, NULL);
-    out_puts(o, "(bands 0..9 low to high; swing = largest step from the middle in ADC counts (of 4095): aim for a few hundred, below 2000)");
+    if (st.gate) out_printf(o, "noise gate: rms %u\n", st.gate);
+    else out_puts(o, "noise gate: off (audio gate learn, in a quiet room)");
+    out_puts(o, "(bands 0..9 low to high; swing = largest step from the middle in ADC counts (of 4095): aim for a few hundred, below 2000;\n"
+                " rms = the block's average loudness, which the gate compares)");
     return 0;
 }
 
@@ -1014,10 +1075,13 @@ const cmd_def_t g_cmds[] = {
     { "token",    "Network access token: token | token <secret> | token off", cmd_token },
     { "hostname", "Network name (DHCP, <name>.local): hostname | hostname <name>", cmd_hostname },
 #endif
+#if CONFIG_KTSN_XIAO_C6_ANTENNA
+    { "antenna",  "XIAO C6 antenna: antenna | antenna internal|external  (built-in ceramic or U.FL; at once)", cmd_antenna },
+#endif
     { "tz",       "Time zone: tz | tz <POSIX TZ>, e.g. tz PST8PDT,M3.2.0,M11.1.0", cmd_tz },
-    { "audio",    "Audio input analysis: audio | audio watch [s] | audio reset | audio bench  (bands, level, beats, time per block; bench: time the analysis on a test signal)", cmd_audio },
+    { "audio",    "Audio input analysis: audio | audio watch [s] | audio reset | audio bench | audio gate [<rms> | off | learn [s]]  (bands, level, beats, time per block; bench: time the analysis on a test signal; gate: room noise below it stays dark)", cmd_audio },
     { "loc",      "Location for sunrise and sunset: loc | loc <lat> <lon> | loc off  (degrees, north and east positive)", cmd_loc },
-    { "save",     "Save programs, autoexec, automation, channels, outputs, gamma, dither, white, output, intensity, tz, loc (and wifi, ntp, token, hostname) to flash", cmd_save },
+    { "save",     "Save programs, autoexec, automation, channels, outputs, gamma, dither, white, output, intensity, tz, loc (and wifi, ntp, token, hostname, antenna) to flash", cmd_save },
     { "config",   "Show what is saved in flash, or: config erase", cmd_config },
     { "reboot",   "Restart the controller", cmd_reboot },
 };

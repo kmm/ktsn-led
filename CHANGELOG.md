@@ -3,6 +3,41 @@
 One version (`version.txt`) covers the firmware, the DSL, the console and HTTP API, and the IDE. Rules for bumping it
 are in CLAUDE.md ("Versioning"). Newest first; versions before 0.10.0 were not recorded here.
 
+## 0.26.0 (2026-11-13)
+- Audio: a noise gate, so a quiet room stays dark. Before, the automatic gain turned room noise up until it filled the
+  bands and level within ~10 s of quiet. The gate is an RMS (a block's average loudness) in ADC counts: blocks below it
+  are silence (outputs fall to 0, no beats, nothing learned), and sound just above it shows dim instead of being turned
+  up to full. `audio gate learn [s]` listens to the quiet room (5 s by default) and sets the gate a little above its
+  noise (90th percentile + ~3.5 dB, so a click doesn't count); `audio gate <rms>` / `audio gate off` set it by hand;
+  `save` keeps it. Off by default.
+- `audio` and `audio watch` show each block's `rms` and mark gated blocks; API status `audio.rms`, config `audio_gate`
+  (GET and PATCH). IDE: the Board panel shows rms and the gate, with a Learn button.
+
+## 0.25.0 (2026-11-13)
+- New: lists. `(list a b ...)` holds up to 255 values of one type (numbers, colours, buffers such as palettes,
+  strings, t/nil), past the usual 10-argument limit; keep one in a variable with `def`. `(list-len l)`,
+  `(list-nth l i)` (negative counts from the end). Entries are worked out only when picked.
+- New: `(list-pick l period)` gives the entry for now and changes every `period` seconds. The entries go round in
+  shuffled rounds (each once per round, never the same twice in a row), different per channel and per list. It needs
+  no memory, so it carries on after a reboot. For example, a new palette every 5 minutes:
+  `(fill-grad (buf O) (list-pick pals 300))`.
+- New (automation): `(play-pick ch (list "fire" "rain" ...) [period])` plays one of the listed library programs, picked
+  the same way. Without a period it keeps the channel's program if it is from the list, otherwise it plays a random
+  one. `(play-library ch "party-" [period])` does the same over the library programs whose names start with the
+  prefix, read from the library each time it runs.
+- `play` also takes the name as a string, which may be made while the program runs: `(play 0 "fire")`,
+  `(play 0 (list-nth l 2))`. A bare name works as before.
+- Programs with their own functions named `list` keep working (the list form is then theirs).
+- IDE: the preview runs `list-pick` on its clock; reference category Lists.
+
+## 0.24.0 (2026-11-13)
+- New build variants `esp32c6-xiao` and `esp32c6-xiao-parlio` for the Seeed XIAO ESP32-C6: the same as `esp32c6` /
+  `esp32c6-parlio` plus its RF switch between the built-in ceramic antenna and the U.FL connector (preset
+  `sdkconfig.xiaoc6`). `antenna internal|external` on the console, `antenna` in the API config, a selector in the IDE
+  Board panel. It applies at once, `save` keeps it, and it is set at boot before WiFi starts (default: built-in).
+  GPIO3 and GPIO14 drive the switch in these builds, so channels and io slots refuse them (they aren't on the XIAO's
+  pins).
+
 ## 0.23.1 (2026-11-13)
 - Fixed (IDE): adding a GPIO slot on a board with none set up offered only binary and pwm; the Board panel now offers
   the modes the board's firmware has (input and analog from 0.20.0, audio from 0.21.0). IDE only: no need to flash.

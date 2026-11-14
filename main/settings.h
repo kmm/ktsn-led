@@ -26,11 +26,13 @@ typedef struct {
     bool           has_loc;                 /* a location is set: env sunrise, sunset, dawn, dusk */
     int32_t        lat, lon;                /* 1e-5 degrees, north and east positive */
     char           hostname[33];            /* DHCP and mDNS name (<hostname>.local) */
+    bool           antenna_ext;             /* XIAO C6 builds (antenna.h): external antenna; applies at once */
     char           token[65];               /* network access token; empty = network CLI/API refuse everyone */
     char          *autoexec;                /* malloc'd source, NULL if none */
     char          *automation;              /* malloc'd source of the automation program, NULL if none (automation.h) */
     uint16_t       auto_every;              /* automation period, seconds 1..3600 */
     io_cfg_t       io[IO_MAX];              /* GPIO outputs (io.h); applies at once, always off at boot */
+    uint16_t       audio_gate;              /* audio input noise gate, RMS in ADC counts, 0 = off (audio.h); at once */
 } settings_t;
 
 extern settings_t g_set;

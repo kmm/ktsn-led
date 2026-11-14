@@ -32,6 +32,16 @@ describe('rendering', () => {
     expect(core.buffer('G0')[1]).toBe(0x0000ff);
     expect(core.buffer('G0').length).toBe(256);      // global buffers are 256 px, like on the boards
   });
+  it('picks from a list by the preview clock (list-pick)', () => {
+    const src = '(fill (buf O) (list-pick (list #000000 #000001 #000002 #000003 #000004) 60))';
+    expect(core.load(src)).toBeNull();
+    const at = (m: number, sec: number) => { core.render(envAt(1, new Date(2026, 9, 15, 12, m, sec), 256)); return core.buffer('O')[0]; };
+    const seq = Array.from({ length: 10 }, (_, m) => at(m, 5));
+    expect(seq.every((v) => v <= 4)).toBe(true);
+    expect(new Set(seq.slice(0, 5)).size + new Set(seq.slice(5)).size).toBeGreaterThanOrEqual(8);   // shuffled rounds
+    for (let m = 1; m < 10; m++) expect(seq[m]).not.toBe(seq[m - 1]);                               // never twice in a row
+    expect(at(3, 59)).toBe(seq[3]);                                                                  // same within a minute
+  });
   it('sees the simulated env', () => {
     core.load('(fill (buf O) #000000) (fill (buf O) #00FF00 0 (/ (env second) 2))');   // second = 7 -> 3 px
     core.render(env());

@@ -1349,24 +1349,253 @@ static bool lib_name_ok(const char *s)
     return true;
 }
 
-/* The name is checked when the program compiles (like env names), so a typo is a compile error. */
-static const char *bind_play(node_t *n, uint8_t *bad)
+#define LIB_NAME_RULES "library names are lower case a-z 0-9 - _, starting with a letter, up to 15"
+
+/* A string as a library name (NUL-terminated copy); false if it can't be one. */
+static bool str_lib_name(strref_t s, char out[16])
 {
-    const char *name = n->args[1].val.u.sym;
-    *bad = 1;
-    if (!lib_name_ok(name)) return "library names are lower case a-z 0-9 - _, starting with a letter, up to 15";
+    if (s.len > 15) return false;
+    memcpy(out, s.p, s.len);
+    out[s.len] = 0;
+    return lib_name_ok(out);
+}
+
+/* A constant name (bare or a string) is checked when the program compiles (like env names), so a typo is a compile
+ * error. Names worked out while the program runs are checked then (a fault). */
+static const char *check_lib_name(const char *name)
+{
+    if (!lib_name_ok(name)) return LIB_NAME_RULES;
     if (s_host && s_host->lib_exists && !s_host->lib_exists(name)) return "no library program by that name (lib to list them)";
     return NULL;
 }
+static const char *bind_play(node_t *n, uint8_t *bad)
+{
+    const value_t *v = &n->args[1].val;
+    char name[16];
+    *bad = 1;
+    if (n->args[1].node) return NULL;
+    if (v->type == V_SYM) return check_lib_name(v->u.sym);
+    return str_lib_name(v->u.str, name) ? check_lib_name(name) : LIB_NAME_RULES;
+}
 
-/* (play ch name): run that library program on the channel (nothing happens if it already runs there) */
+static const char *play_name(int ch, const char *name)
+{
+    if (!s_host->play) return "automation functions aren't available here";
+    return s_host->play(ch, name);
+}
+
+/* (play ch name): run that library program on the channel (nothing happens if it already runs there). The name is
+ * bare (play 0 fire) or a string, which may be made while the program runs. */
 static value_t n_play(exec_ctx_t *c, const value_t *a, uint8_t n)
 {
     (void)n;
     value_t v = { .type = V_NIL };
+    char name[16];
     if ((c->err = check_ch(a[0].u.i))) return v;
-    if (!s_host->play) { c->err = "automation functions aren't available here"; return v; }
-    c->err = s_host->play(a[0].u.i, a[1].u.sym);
+    if (a[1].type == V_SYM) c->err = play_name(a[0].u.i, a[1].u.sym);
+    else if (!str_lib_name(a[1].u.str, name)) c->err = "play: not a library name";
+    else c->err = play_name(a[0].u.i, name);
+    return v;
+}
+
+/* ---- lists: (list ...) is compiled by the compiler (compile_list); these read them ---- */
+
+/* (list-len list) -> how many entries */
+static value_t n_len(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    (void)c; (void)n;
+    return (value_t){ .type = V_INT, .u.i = a[0].u.list->n };
+}
+
+/* The result type of list-nth / list-pick is the list's entry type (known when the program compiles: lists are constants). */
+static const char *bind_list_ret(node_t *n, uint8_t *bad)
+{
+    (void)bad;
+    n->ret = n->args[0].val.u.list->type;
+    return NULL;
+}
+
+/* (list-nth list i): entry i; negative counts from the end. Outside the list is a fault (no entry to give back). */
+static value_t n_nth(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    (void)n;
+    const dsl_list_t *l = a[0].u.list;
+    int32_t i = a[1].u.i;
+    if (i < 0) i += l->n;
+    if (i < 0 || i >= l->n) { c->err = "list-nth: index outside the list"; return (value_t){ .type = V_NIL }; }
+    return dsl_list_item(c, l, i);
+}
+
+/* Seconds on the clock (local time, like the env values; uptime-based until the clock is set). */
+static int64_t env_seconds(const env_t *e)
+{
+    int32_t y = e->year < 1970 ? 1970 : e->year, p = y - 1;
+    int64_t days = (int64_t)(y - 1970) * 365 + (p / 4 - p / 100 + p / 400) - (1969 / 4 - 1969 / 100 + 1969 / 400) + (e->doy ? e->doy - 1 : 0);
+    return days * 86400 + e->hour * 3600 + e->minute * 60 + e->second;
+}
+
+static uint32_t mix32(uint32_t x)
+{
+    x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
+    return x;
+}
+
+/* Fisher-Yates shuffle of 0..n-1 for one round, from the seed: the same round always gives the same order. */
+static void shuffle(uint8_t *p, int n, uint32_t seed, uint32_t round)
+{
+    uint32_t r = mix32(seed ^ mix32(round + 0x9E3779B9u)) | 1u;
+    for (int i = 0; i < n; i++) p[i] = (uint8_t)i;
+    for (int i = n - 1; i > 0; i--) {
+        r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+        int j = (int)(r % (uint32_t)(i + 1));
+        uint8_t t = p[i]; p[i] = p[j]; p[j] = t;
+    }
+}
+
+/* Which of n entries time slot `slot` gets: the slots go round in shuffled rounds of n, so every entry comes once per
+ * round, and a round never starts with the entry the previous one ended on (no entry twice in a row). Stateless: the
+ * same slot always gives the same entry, on every run and after a reboot. */
+int dsl_pick_index(int n, uint32_t seed, int64_t slot)
+{
+    if (n <= 1 || slot < 0) return 0;
+    if (n == 2) return (int)((slot + (seed & 1)) & 1);   /* two: they take turns (a swap would move the round's end) */
+    uint8_t p[DSL_LIST_MAX], prev[DSL_LIST_MAX];
+    uint32_t round = (uint32_t)(slot / n);
+    int pos = (int)(slot % n);
+    shuffle(p, n, seed, round);
+    if (round > 0) {
+        shuffle(prev, n, seed, round - 1);
+        if (p[0] == prev[n - 1]) { uint8_t t = p[0]; p[0] = p[1]; p[1] = t; }   /* n >= 3: the round's end stays */
+    }
+    return p[pos];
+}
+
+static int64_t pick_slot(exec_ctx_t *c, int32_t period)
+{
+    return env_seconds(c->env) / period;
+}
+
+/* (list-pick list period): the entry for now, a new one every `period` seconds (see dsl_pick_index). The seed is the channel's
+ * number and the list's, so channels, and lists in one program, change differently. */
+static value_t n_pick(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    (void)n;
+    const dsl_list_t *l = a[0].u.list;
+    if (a[1].u.i < 1) { c->err = "list-pick: the period must be at least 1 second"; return (value_t){ .type = V_NIL }; }
+    uint32_t seed = mix32((uint32_t)c->ch->id * 0x85EBCA6Bu ^ (uint32_t)l->id * 0xC2B2AE35u);
+    return dsl_list_item(c, l, dsl_pick_index(l->n, seed, pick_slot(c, a[1].u.i)));
+}
+
+static const char *bind_period(node_t *n, int i, uint8_t *bad)
+{
+    if (n->nargs > i && !n->args[i].node && n->args[i].val.type == V_INT && n->args[i].val.u.i < 1) { *bad = (uint8_t)i; return "the period is in seconds, at least 1"; }
+    return NULL;
+}
+static const char *bind_pick(node_t *n, uint8_t *bad)
+{
+    bind_list_ret(n, bad);
+    return bind_period(n, 1, bad);
+}
+
+/* (play-pick ch list [period]): play one of the list's library programs. With a period: the one for now, as list-pick does
+ * (seeded by the target channel, so channels sharing a list differ). Without: keep what automation put there if it is
+ * in the list, else play a random one. Constant names are checked when the program compiles. */
+static const char *bind_play_pick(node_t *n, uint8_t *bad)
+{
+    const dsl_list_t *l = n->args[1].val.u.list;
+    *bad = 1;
+    if (l->type != V_STR) return "play-pick takes a list of library program names, e.g. (list \"fire\" \"rain\")";
+    for (int i = 0; i < l->n; i++) {
+        char name[16];
+        if (l->items[i].node) continue;
+        if (!str_lib_name(l->items[i].val.u.str, name)) return LIB_NAME_RULES;
+        const char *why = check_lib_name(name);
+        if (why) return why;
+    }
+    return bind_period(n, 2, bad);
+}
+
+/* The entry of l automation should play on ch now: -1 = keep what runs (or a fault in c->err). */
+static int pick_for(exec_ctx_t *c, int ch, int count, uint32_t seed, const value_t *period, bool (*runs_one)(exec_ctx_t *, const void *, const char *), const void *ctx)
+{
+    if (period->type != V_NIL) {
+        if (period->u.i < 1) { c->err = "the period must be at least 1 second"; return -1; }
+        return dsl_pick_index(count, seed, pick_slot(c, period->u.i));
+    }
+    const char *now = s_host->playing ? s_host->playing(ch) : NULL;
+    if (now && runs_one(c, ctx, now)) return -1;
+    return c->err ? -1 : (int)(rnd(c) % (uint32_t)count);
+}
+
+static bool list_has(exec_ctx_t *c, const void *ctx, const char *name)
+{
+    const dsl_list_t *l = ctx;
+    size_t len = strlen(name);
+    for (int i = 0; i < l->n; i++) {
+        value_t v = dsl_list_item(c, l, i);
+        if (c->err) return false;
+        if (v.u.str.len == len && !memcmp(v.u.str.p, name, len)) return true;
+    }
+    return false;
+}
+
+static value_t n_play_pick(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    value_t v = { .type = V_NIL }, none = { .type = V_NIL };
+    const dsl_list_t *l = a[1].u.list;
+    char name[16];
+    if ((c->err = check_ch(a[0].u.i))) return v;
+    uint32_t seed = mix32((uint32_t)a[0].u.i * 0x85EBCA6Bu ^ (uint32_t)l->id * 0xC2B2AE35u ^ 0x5049434Bu);
+    int k = pick_for(c, a[0].u.i, l->n, seed, n > 2 ? &a[2] : &none, list_has, l);
+    if (k < 0) return v;
+    value_t s = dsl_list_item(c, l, k);
+    if (c->err) return v;
+    if (!str_lib_name(s.u.str, name)) { c->err = "play-pick: not a library name"; return v; }
+    c->err = play_name(a[0].u.i, name);
+    return v;
+}
+
+/* (play-library ch prefix [period]): like play-pick, over the library programs whose names start with prefix (read
+ * from the board's library when it runs, in name order; "" = all of them). */
+static const char *bind_play_library(node_t *n, uint8_t *bad)
+{
+    const value_t *p = &n->args[1].val;
+    if (!n->args[1].node) {
+        if (p->u.str.len > 15) { *bad = 1; return "a library name prefix is at most 15 characters"; }
+        for (int i = 0; i < p->u.str.len; i++) {
+            char ch = p->u.str.p[i];
+            if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')) { *bad = 1; return LIB_NAME_RULES; }
+        }
+    }
+    return bind_period(n, 2, bad);
+}
+
+static bool prefix_has(exec_ctx_t *c, const void *ctx, const char *name)
+{
+    (void)c;
+    const strref_t *p = ctx;
+    return strlen(name) >= p->len && !memcmp(name, p->p, p->len);
+}
+
+static value_t n_play_library(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    value_t v = { .type = V_NIL }, none = { .type = V_NIL };
+    char prefix[16], name[16];
+    if ((c->err = check_ch(a[0].u.i))) return v;
+    if (!s_host->lib_match) { c->err = "play-library isn't available here"; return v; }
+    if (a[1].u.str.len > 15) { c->err = "play-library: prefix too long"; return v; }
+    memcpy(prefix, a[1].u.str.p, a[1].u.str.len);
+    prefix[a[1].u.str.len] = 0;
+    int count = s_host->lib_match(prefix, -1, name);
+    if (count <= 0) { c->err = "play-library: no library program starts with that"; return v; }
+    if (count > DSL_LIST_MAX) count = DSL_LIST_MAX;
+    uint32_t seed = (uint32_t)a[0].u.i * 0x85EBCA6Bu ^ 0x4C494252u;
+    for (int i = 0; prefix[i]; i++) seed = mix32(seed ^ (uint8_t)prefix[i]);
+    strref_t pre = { prefix, a[1].u.str.len };
+    int k = pick_for(c, a[0].u.i, count, seed, n > 2 ? &a[2] : &none, prefix_has, &pre);
+    if (k < 0) return v;
+    if (s_host->lib_match(prefix, k, name) <= k) { c->err = "play-library: the library changed"; return v; }
+    c->err = play_name(a[0].u.i, name);
     return v;
 }
 
@@ -1710,6 +1939,9 @@ static const native_def_t k_natives[] = {
     { "str-cat",  n_str_cat,  V_STR, 2, 10, { A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY }, 0, bind_str_cat },
     { "str-sub",  n_str_sub,  V_STR, 1, 3,  { A_STR, A_INT, A_INT },                             NF_FOLD, NULL },
     { "str-len",  n_str_len,  V_INT, 1, 1,  { A_STR },                                           NF_FOLD, NULL },
+    { "list-len", n_len,      V_INT, 1, 1,  { A_LIST },                                          NF_FOLD, NULL },
+    { "list-nth", n_nth,      V_NIL, 2, 2,  { A_LIST, A_INT },                                   0,       bind_list_ret },
+    { "list-pick", n_pick,    V_NIL, 2, 2,  { A_LIST, A_INT },                                   0,       bind_pick },
     { "seg7",   n_seg7,   V_BUF, 2, 6, { A_BUF, A_ANY, A_SYM, A_INT, A_INT, A_INT },                0, bind_seg7 },
     { "seg9",   n_seg9,   V_BUF, 2, 6, { A_BUF, A_ANY, A_SYM, A_INT, A_INT, A_INT },                0, bind_seg9 },
     { "seg14",  n_seg14,  V_BUF, 2, 8, { A_BUF, A_ANY, A_SYM, A_INT, A_INT, A_INT, A_INT, A_INT },  0, bind_seg14 },
@@ -1728,7 +1960,9 @@ static const native_def_t k_natives[] = {
     { "env",    n_env,    V_INT, 1, 1, { A_SYM },  0, bind_env },
     { "intensity",     n_intensity,     V_FIX, 0, 1, { A_INT },                     NF_AUTOMATION, NULL },
     { "set-intensity", n_set_intensity, V_NIL, 2, 3, { A_INT, A_UNIT, A_NUMERIC },  NF_AUTOMATION | NF_OPT0, NULL },
-    { "play",          n_play,          V_NIL, 2, 2, { A_INT, A_SYM },              NF_AUTOMATION, bind_play },
+    { "play",          n_play,          V_NIL, 2, 2, { A_INT, A_STR },              NF_AUTOMATION | NF_NAME1, bind_play },
+    { "play-pick",     n_play_pick,     V_NIL, 2, 3, { A_INT, A_LIST, A_INT },      NF_AUTOMATION, bind_play_pick },
+    { "play-library",  n_play_library,  V_NIL, 2, 3, { A_INT, A_STR, A_INT },       NF_AUTOMATION, bind_play_library },
     { "stop",          n_stop,          V_NIL, 1, 1, { A_INT },                     NF_AUTOMATION, NULL },
     { "io",            n_io,            V_FIX, 1, 1, { A_INT },                     NF_AUTOMATION | NF_IDARG, bind_io },
     { "io-set",        n_io_set,        V_NIL, 2, 2, { A_INT, A_ANY },              NF_AUTOMATION | NF_IDARG, bind_io },

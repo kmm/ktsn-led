@@ -216,6 +216,8 @@ static int               s_abuf_n;
 static uint32_t          s_adc_hz, s_audio_decim;
 static volatile uint32_t s_ovf, s_ovf0, s_blocks, s_us_sum, s_us_max, s_beat_at;
 static volatile bool     s_beat_seen;
+static uint16_t *volatile s_learn;
+static volatile int      s_learn_n, s_learn_cap;
 
 static bool IRAM_ATTR on_ovf(adc_continuous_handle_t h, const adc_continuous_evt_data_t *e, void *u)
 {
@@ -310,8 +312,11 @@ static void audio_sample(uint16_t v)
     s_abuf[s_abuf_n++] = v;
     if (s_abuf_n < AUDIO_N) return;
     s_abuf_n = 0;
+    s_audio.gate = g_set.audio_gate;                   /* changes apply from the next block */
     int64_t t0 = esp_timer_get_time();
     audio_block(&s_audio, s_abuf, (uint32_t)(t0 / 1000));
+    uint16_t *lb = s_learn;
+    if (lb && s_learn_n < s_learn_cap) { lb[s_learn_n] = s_audio.rms; s_learn_n = s_learn_n + 1; }
     uint32_t us = (uint32_t)(esp_timer_get_time() - t0);
     s_blocks++;
     s_us_sum += us;
@@ -368,6 +373,23 @@ void io_audio_stat(io_audio_stat_t *st)
     st->level = s_audio.level;
     st->beats = s_audio.beats;
     st->swing = s_audio.swing;
+    st->rms = s_audio.rms;
+    st->gate = g_set.audio_gate;
+}
+
+void io_audio_learn_begin(uint16_t *buf, int cap)
+{
+    s_learn = NULL;
+    s_learn_n = 0;
+    s_learn_cap = cap;
+    s_learn = buf;
+}
+
+int io_audio_learn_end(void)
+{
+    s_learn = NULL;
+    vTaskDelay(pdMS_TO_TICKS(20));                     /* a block being stored right now finishes */
+    return s_learn_n;
 }
 
 int32_t io_audio_beatms(void)

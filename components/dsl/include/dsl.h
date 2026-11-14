@@ -22,14 +22,15 @@
 #define DSL_STR_MAX          255    /* characters in a string literal or a string made at run time */
 
 /* ---- values ---- */
-typedef enum { V_NIL = 0, V_INT, V_FIX, V_COLOR, V_BUF, V_SYM, V_BOOL, V_STR, V_FN } vtype_t;   /* V_BOOL: u.i is 0 (nil) or 1 (t) */
+typedef enum { V_NIL = 0, V_INT, V_FIX, V_COLOR, V_BUF, V_SYM, V_BOOL, V_STR, V_FN, V_LIST } vtype_t;   /* V_BOOL: u.i is 0 (nil) or 1 (t) */
 /* V_FIX is Q16.16. Argument kinds natives can declare: */
-typedef enum { A_BUF = 0, A_COLOR, A_INT, A_UNIT, A_SYM, A_NUM, A_BOOL, A_ANY, A_NUMERIC, A_STR, A_FN } atype_t;
+typedef enum { A_BUF = 0, A_COLOR, A_INT, A_UNIT, A_SYM, A_NUM, A_BOOL, A_ANY, A_NUMERIC, A_STR, A_FN, A_LIST } atype_t;
 /* A_UNIT: 0.0..1.0 -> Q8 0..256 (clamped).  A_NUM: any int or decimal -> Q16.16 (V_FIX), ints saturate at +-32767.
  * A_NUMERIC: int or decimal, passed unchanged (V_INT or V_FIX).  A_BOOL: t/nil only, no numeric truthiness.
  * A_ANY: any value, including calls that return nothing (natives check types in their bind hook).  A_STR: a string.
  * A_FN: a function, given as a defn name or (fn (params) body); always a constant (V_FN), the bind hook checks its
- * signature (ufn_t in dsl_internal.h). Function values exist only as such arguments: they can't be stored or returned. */
+ * signature (ufn_t in dsl_internal.h). Function values exist only as such arguments: they can't be stored or returned.
+ * A_LIST: a (list ...) or a variable def'd as one; always a constant (V_LIST, dsl_list_t), never a function's result. */
 
 /* View of `len` pixels: pixel i is px[i * stride]. Whole buffers have stride 1; slices may step or run backwards. */
 typedef struct { pixel_t *px; uint16_t len; int32_t stride; } bufref_t;
@@ -39,7 +40,7 @@ static inline pixel_t *buf_at(const bufref_t *b, int32_t i) { return b->px + (pt
 typedef struct { const char *p; uint16_t len; } strref_t;
 typedef struct {
     uint8_t type;
-    union { int32_t i; uint32_t color; bufref_t buf; const char *sym; strref_t str; const struct ufn *fn; } u;
+    union { int32_t i; uint32_t color; bufref_t buf; const char *sym; strref_t str; const struct ufn *fn; const struct dsl_list *list; } u;
 } value_t;
 
 /* ---- environment (written by the system, read by programs) ---- */
@@ -90,12 +91,23 @@ typedef value_t (*native_fn)(exec_ctx_t *c, const value_t *args, uint8_t nargs);
 #define NF_AUTOMATION 4   /* only in the automation program (DSL_CTX_AUTOMATION); a compile error elsewhere */
 #define NF_OPT0 8   /* the first argument may be `_` although it is required (e.g. set-intensity: _ = global) */
 #define NF_IDARG 16 /* the first argument (A_INT) may also be a bare name, passed as V_SYM for the bind hook to resolve */
+#define NF_NAME1 32 /* the second argument (A_STR) written as a bare name is that name (V_SYM, never a variable) */
 
 /* Optional compile-time hook, run once after a call's args are compiled. It may validate and rewrite constant args
  * (e.g. turn a name into an index) and set the call's result type n->ret (e.g. `if` takes its branches' type).
  * Returns NULL, or an error message with *bad set to the offending arg index. */
 typedef struct { struct node *node; value_t val; } arg_t;     /* node != NULL -> evaluated at run time */
 typedef const char *(*native_bind_fn)(struct node *n, uint8_t *bad);
+
+/* (list a b ...): built when the program compiles, in the program block, any length up to DSL_LIST_MAX (the compiler
+ * reads the form itself, so DSL_MAX_ARGS doesn't apply). Entries share one type; each is evaluated only when it is
+ * picked (list-nth, list-pick), so a long list costs nothing per frame. id: the list's number in its program (list-pick's seed). */
+#define DSL_LIST_MAX 255
+typedef struct dsl_list {
+    uint8_t  type, n;            /* vtype_t of the entries; 1..DSL_LIST_MAX */
+    uint16_t id, stack;          /* stack: the deepest entry's estimated evaluator stack */
+    arg_t    items[];
+} dsl_list_t;
 
 typedef struct {
     const char *name;
@@ -158,6 +170,11 @@ typedef struct {
     int         (*io_mode)(int n);
     bool        (*in_get)(int n);
     uint32_t    (*analog_get)(int n, int samples);
+    /* play-pick / play-library. playing: the library program automation put on channel ch, if it still runs there
+     * (else NULL). lib_match: how many library programs start with prefix; with 0 <= k < that, the k-th of them in
+     * name order is copied into name. Without them every pick plays, and play-library faults. */
+    const char *(*playing)(int ch);
+    int         (*lib_match)(const char *prefix, int k, char name[16]);
 } dsl_host_t;
 enum { DSL_IO_BINARY = 0, DSL_IO_PWM, DSL_IO_INPUT, DSL_IO_ANALOG, DSL_IO_AUDIO };
 #define DSL_ANALOG_SAMPLES_DEFAULT 16
@@ -175,6 +192,7 @@ typedef struct channel {
     globals_t *globals;
     uint32_t   rng;                            /* xorshift32 state, never 0; seed it after channel_init */
     uint8_t    ctx;                            /* DSL_CTX_*: set before compiling (channel_init: render) */
+    uint8_t    id;                             /* the channel's number (seeds list-pick, so channels pick differently) */
     int64_t    deadline_us;                    /* function calls and loops fault past this time (dsl_set_clock), 0 = no limit */
     struct {
         stat_us_t render, output;

@@ -38,6 +38,7 @@ const uint8_t audio_band_edges[AUDIO_BANDS + 1] = { 1, 2, 4, 7, 12, 20, 33, 55, 
 #define BEAT_SPREAD 4                            /* 4 x (median - lower quartile) above it (~2.7 sd for normal noise) */
 #define BEAT_GAP   250                           /* and at least this many ms after the last beat */
 #define BEAT_QUIET 2048                          /* no beats from bass more than 24 dB below the loudest band */
+#define GATE_SPAN  1024                          /* with a gate: 0..1 covers at least 12 dB above it */
 
 void audio_init(audio_t *a) { memset(a, 0, sizeof *a); }
 
@@ -88,11 +89,17 @@ static void gain_update(audio_t *a, int g, int32_t L, int32_t min_span)
     if (L < a->fl[g]) a->fl[g] = L; else a->fl[g] += FL_RISE;
 }
 
-static uint32_t gain_map(const audio_t *a, int g, int32_t L, int32_t min_span)
+/* gbot: where the gate lies on this scale (INT32_MIN = no gate). The range never reaches below it, so sound just
+ * above the gate shows dim instead of being turned up to fill the range. */
+static uint32_t gain_map(const audio_t *a, int g, int32_t L, int32_t min_span, int32_t gbot)
 {
     int32_t pk = a->pk[g], bot = a->fl[g];
     if (bot < pk - MAX_SPAN) bot = pk - MAX_SPAN;
     if (bot > pk - min_span) bot = pk - min_span;
+    if (gbot > bot) {
+        bot = gbot;
+        if (pk < bot + GATE_SPAN) pk = bot + GATE_SPAN;
+    }
     if (L <= bot) return 0;
     if (L >= pk) return AUDIO_ONE;
     return (uint32_t)((uint64_t)(L - bot) * AUDIO_ONE / (uint32_t)(pk - bot));
@@ -107,14 +114,22 @@ void audio_block(audio_t *a, const uint16_t *s, uint32_t now_ms)
     for (int n = 0; n < AUDIO_N; n++) sum += s[n] > 4095 ? 4095 : s[n];
     int32_t mean = (sum + AUDIO_N / 2) / AUDIO_N;
     int32_t swing = 0;
+    uint64_t sq = 0;
     for (int n = 0; n < AUDIO_N; n++) {
         int32_t d = (s[n] > 4095 ? 4095 : s[n]) - mean;
+        sq += (uint64_t)(d * d);
         if (d < 0) d = -d;
         if (d > swing) swing = d;
     }
     a->swing = (uint16_t)swing;
+    uint32_t ms = (uint32_t)(sq / AUDIO_N), r = 0;           /* integer square root of the mean square */
+    for (uint32_t bit = 1u << 22; bit; bit >>= 2) {           /* ms < 2^24 */
+        if (ms >= r + bit) { ms -= r + bit; r = (r >> 1) + bit; } else r >>= 1;
+    }
+    a->rms = (uint16_t)r;
     a->beat = false;
-    if (swing < AUDIO_GATE) {                    /* silence: let everything fall, learn nothing */
+    uint64_t gsq = (uint64_t)a->gate * a->gate * AUDIO_N;
+    if (swing < AUDIO_GATE || sq < gsq) {        /* silence: let everything fall, learn nothing */
         for (int b = 0; b < AUDIO_BANDS; b++) a->band[b] = release(a->band[b], 0);
         a->level = release(a->level, 0);
         return;
@@ -143,10 +158,18 @@ void audio_block(audio_t *a, const uint16_t *s, uint32_t now_ms)
     int32_t L[AUDIO_BANDS], top = INT32_MIN;
     for (int b = 0; b < AUDIO_BANDS; b++) { L[b] = audio_log2q8(pw[b]) - undo; if (L[b] > top) top = L[b]; }
     int32_t lt = audio_log2q8(total) - undo;
+    /* The gate on each scale: this block is `above` (log2 Q8) over it, so the gate lies that far below this block's
+     * total and loudest band. */
+    int32_t g0 = INT32_MIN, g1 = INT32_MIN;
+    if (a->gate) {
+        int32_t above = audio_log2q8(sq) - audio_log2q8(gsq);
+        g0 = top - above;
+        g1 = lt - above;
+    }
     gain_update(a, 0, top, BAND_SPAN);
     gain_update(a, 1, lt, LEVEL_SPAN);
-    for (int b = 0; b < AUDIO_BANDS; b++) a->band[b] = release(a->band[b], gain_map(a, 0, L[b], BAND_SPAN));
-    a->level = release(a->level, gain_map(a, 1, lt, LEVEL_SPAN));
+    for (int b = 0; b < AUDIO_BANDS; b++) a->band[b] = release(a->band[b], gain_map(a, 0, L[b], BAND_SPAN, g0));
+    a->level = release(a->level, gain_map(a, 1, lt, LEVEL_SPAN, g1));
     a->started = true;
 
     int32_t lb = audio_log2q8(bass) - undo;
@@ -170,4 +193,19 @@ void audio_block(audio_t *a, const uint16_t *s, uint32_t now_ms)
     a->hist[a->hist_at] = lb;
     a->hist_at = (uint8_t)((a->hist_at + 1) % AUDIO_HIST);
     if (a->hist_n < AUDIO_HIST) a->hist_n++;
+}
+
+uint16_t audio_gate_learn(uint16_t *rms, int n)
+{
+    if (n <= 0) return 0;
+    for (int i = 1; i < n; i++) {                /* insertion sort: a few hundred values, once */
+        uint16_t v = rms[i];
+        int j = i;
+        while (j > 0 && rms[j - 1] > v) { rms[j] = rms[j - 1]; j--; }
+        rms[j] = v;
+    }
+    uint32_t g = ((uint32_t)rms[(n - 1) * 9 / 10] * 3 + 1) / 2;
+    if (g < 1) g = 1;
+    if (g > AUDIO_GATE_MAX) g = AUDIO_GATE_MAX;
+    return (uint16_t)g;
 }

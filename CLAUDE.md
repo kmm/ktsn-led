@@ -88,6 +88,8 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   0.19.0..0.23.1; firmware 0.23.0 confirmed by the user on the C6 and ESP32, 0.23.1 changed only the IDE); its zips
   not flashed yet. v0.26.0 released 2026-11-13 (notes cover 0.24.0..0.26.0; 0.26.0 flashed and confirmed by the user
   on the C6 with the MAX9814); its zips not flashed yet.
+  v0.28.0 released 2026-11-14 (notes cover 0.27.0..0.28.0; both flashed and confirmed by the user); its zips not
+  flashed yet.
 
 ## Design decisions (keep these unless there is a reason to change them)
 - Pixel layout `0xWWRRGGBB`. Color order is applied only at output (`led_out.c`, per channel wire format). Global intensity is applied at output, not baked into buffers.
@@ -496,6 +498,18 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   compile error pointing at the name, never a run-time lookup or fault.
 - **Values used as indices** must not go negative by accident (negatives index from the end); e.g. `env frame` is masked.
 - **Lists of colors** (palettes) are passed as a buffer view, not variadic args: `(fill-grad (buf O) (slice (buf G0) 0 3))`.
+  **`(palette c ...)`** (0.28.0, 2026-11-14, step 2 of named palettes): a compiler form (`compile_palette`, like `list`:
+  yields to a user `defn palette`; 1..DSL_LIST_MAX colours, each compiled as A_COLOR, may be computed) -> a node of the
+  internal NF_LAZY `dsl_palette` (natives.c, not in the table) with arg 0 a `dsl_list_t` of the colours (id 0, not
+  counted in `nlists`, so list-pick seeds don't move) and arg 1 a V_BUF over n pixels allocated in the program block.
+  Every evaluation refills the pixels from the colours and returns the view. Planned as "natives that write into it
+  are refused at compile time"; changed while implementing (told the user): refilling makes writes safe and useful
+  (`(scale p 0.5)` dims that copy until it runs again) and covers palettes passed through variables, lists and
+  function parameters, which a compile-time check couldn't follow. Views only live within a run (like slices of X..O),
+  so nothing points into an old program after a swap. IDE Palette tab: target `OWN` (-1, the default) writes
+  `(def name (palette ...))` or a bare `(palette ...)` (8 colours a line, no trailing newline when bare);
+  `findPalettes` also recognises `(def name (palette #..))` and, via `topForms(src, all)` collecting nested forms,
+  `(palette #..)` anywhere (plain colours only, up to MAX_STOPS); a linked inline one is always written back bare.
 - **Randomness** comes from the per-channel xorshift32 `ch->rng` (seeded from `esp_random()` in `main.c`, fixed seed on
   host so tests are repeatable). Never call platform RNGs from the core.
 - **Booleans** are their own type `V_BOOL`, literals `t` / `nil`. Conditions (`if`/`and`/`or`/`not`) take only booleans;
@@ -547,7 +561,7 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   variable (`UF_KEEP`, set by `compile_def`). A body form that is a constant becomes a `dsl_const` node.
   Render/automation stacks raised to 8 KB (`RENDER_STACK`, `AUTOMATION_STACK`).
 - **Libraries** (`use`, 0.15.0, step 2 of user functions): `(use name)` is top level only; a used program may contain
-  only defn/use. compile.c: `unit_t` per source (0 = the program; `DSL_MAX_USES` 8 libraries), `scan_unit` walks the uses
+  only defn/use (and def from 0.27.0, see below). compile.c: `unit_t` per source (0 = the program; `DSL_MAX_USES` 8 libraries), `scan_unit` walks the uses
   depth first through `dsl_host_t.lib_load` (malloc'd, the core frees it; optional `lib_why` says why a name can't be
   used). The functions are copied into the program when it compiles: no pointers between programs. All of the program's
   own functions are compiled, of the libraries only those reached (`DSL_MAX_FNS` 64, uint64 masks). An error in a library
@@ -558,6 +572,19 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   (`usedNames`, `localSources`, `loadUses`, `usesFirst`), App effect feeds `core.setUseSources` (connected: board programs
   reachable from the open tabs; offline: local library), `Editor.recheck` re-lints when they change, upload compiles with
   `core.checkUsing` against board + selection.
+  **Library defs** (0.27.0, 2026-11-14; asked for named palettes shared across programs; the user agreed to this instead
+  of a run-time global table set by autoexec, which would have had no compile-time types, values pointing into the freed
+  autoexec channel, and no recheck when autoexec changes): libraries may contain `def` too. `scan_unit` records each
+  library in `cc_tables_t.post` when it finishes (post-order: a library after those it uses). `compile_pass` collects
+  every library top-level def (`libdef_t`: source position, FNV hash of the name, unit; `LIB_DEFS_MAX` 255 across the
+  libraries used), marks those whose name appears as any symbol in the program's non-defn/use forms (`ldef_refs`; a hash
+  collision or a same-named symbol only compiles one more def), then repeatedly the defs those needed defs name, adding
+  the functions they call to `roots`. Step 4 compiles the needed ones (post order, source order within a library) with
+  `cc.unit` = their unit, before the program's own forms; unneeded defs are never compiled (no slots, no errors from
+  them). `var_t.unit`: `compile_def` refuses a def of a visible name made in another unit ("'x' is already defined in
+  library 'l'; give it another name"), so a program can't redefine a library name and two libraries can't share one the
+  program reaches; a library may redefine its own. Defn bodies are barriers, so library functions don't see them.
+  IDE: `libraryDefs` (dslLanguage.ts) feeds autocomplete; the `use` reference example uses a palette list.
 - **Lists** (0.25.0, 2026-11-13; plan agreed with the user: a constant list form instead of a list type with push,
   stateless time-slot picks, distinct seeds per channel, palettes too, a library-prefix variant):
   `(list a b ...)` is compiled by the compiler (`compile_list`, like `fn`: not a native, so no DSL_MAX_ARGS limit;
@@ -686,11 +713,23 @@ Console: `version` (what runs, slot, unconfirmed update?, other slot), `prog <ch
   faults, ~20 compile errors, old user functions named list/len/nth; the shuffle for n = 2..255 over 40 rounds, seeds;
   list-pick per period, channel and list; `t_play_pick`: play with strings, play-pick with and without a period,
   play-library prefixes and rounds, missing hooks), IDE tests (reference examples run, preview list-pick), checked by
-  Claude in the dev-server preview (palette changes every period), builds for every variant. **Not run on hardware.**
+  Claude in the dev-server preview (palette changes every period), builds for every variant. **Verified by the user
+  on the board** (2026-11-14): lists work, play-library picks fine.
 - XIAO antenna switch (0.24.0, 2026-11-13): builds for every variant, IDE Board panel selector checked by Claude
   against a mock board. **Verified by the user on a XIAO C6** (2026-11-13): selecting the external antenna
   raised RSSI by ~10 dB.
-Host tests: 6158 checks, 0 failures (macOS clang and gcc). **Builds cleanly with ESP-IDF v6.1 for esp32, flashed and running; RGB color order confirmed on the WS2811 string.**
+- Library defs (0.27.0, 2026-11-14): host-tested (`t_use`: colours, palettes in G0, lists of library palettes, a
+  library using another library's defs and calling a function from a def, redefinition inside a library, library defs
+  running before the program, an unreached broken def, 70 defs with one used (slots), errors: redefining a library
+  name, two libraries, a reached broken def, a function reading a library def), IDE tests (`libraryDefs`, the `use`
+  reference example), builds for every variant. **Verified by the user on the board** (2026-11-14).
+- Palette literal (0.28.0, 2026-11-14): host-tested (`t_palette`: colours, fill-grad, computed colours, refilled
+  every run and every frame after a write, in lists, slices of it, a user `palette` function, 255 / 256 colours, errors,
+  a faulting entry; `t_use`: palettes in a library), IDE tests (paletteCode / findPalettes for (palette ...) incl.
+  nested ones, compiled and rendered on the real core, reference example), checked by Claude in the dev-server
+  preview (renders; ▦ on a def'd and an inline palette; editing the inline one and applying keeps it inline), builds
+  for every variant. **Verified by the user on the board** (2026-11-14).
+Host tests: 6189 checks, 0 failures (macOS clang and gcc). **Builds cleanly with ESP-IDF v6.1 for esp32, flashed and running; RGB color order confirmed on the WS2811 string.**
 - Toolchain: `source ~/.espressif/tools/activate_idf_v6.1.sh` (EIM install).
 - `led_strip` is pinned to `^3.0.0` (3.x uses `color_component_format`; 2.x used `led_pixel_format`). Color order is the per-channel wire format (it was `LED_COLOR_FORMAT` in `config.h` until 2026-10-18).
 - `main` requires `esp_driver_rmt` (not the legacy `driver` component).
@@ -865,6 +904,8 @@ Still unverified on hardware:
 2. `led_model` is `LED_MODEL_WS2812` (800 kHz). led_strip 3.x also has `LED_MODEL_WS2811`; try it if the string misbehaves.
 
 ## Next steps (planned)
+- Named palettes (agreed with the user 2026-11-14, two steps): step 1 library `def`s (done, 0.27.0); step 2
+  `(palette ...)` (done, 0.28.0; refilled every run instead of refusing writes, see "Lists of colors").
 - Time comparisons, inputs, audio (plan agreed with the user 2026-11-12; pushed with CI on the user's word 2026-11-12,
   with audio untested on a microphone; the user's MAX9814 arrived 2026-11-13: noise gate in 0.26.0, beat detection
   on real music still to judge). One handover + bump per phase:

@@ -4,17 +4,19 @@
 //   (def pal (set (slice (buf G0) 0 3) 0 #A #B #C))
 //   (def pal (slice (buf G0) 0 10)) (set pal 0 #.. x8) (set pal 8 #.. #..)
 //   (set (slice (buf G0) 0 10) 0 #.. x8) (set (slice (buf G0) 0 10) 8 #.. #..)
+//   (def pal (palette #A #B #C)), and a (palette #A #B ...) anywhere (inside other calls too)
 // Only exact matches, so writing the palette back can't lose anything.
 import { HEX_RE } from '../color/colors';
-import { SET_MAX, type PaletteTarget } from './palette';
+import { MAX_STOPS, OWN, SET_MAX, type PaletteTarget } from './palette';
 
 export interface PaletteSpan { from: number; to: number; text: string; stops: string[]; target: PaletteTarget }
 
 type Sx = string | Sx[];
 interface Form { from: number; to: number; sx: Sx }
 
-/** Top-level forms with their positions (comments skipped). Unbalanced text ends the scan. */
-export function topForms(src: string): Form[] {
+/** Top-level forms with their positions (comments skipped). Unbalanced text ends the scan. With `all`, every list
+ *  form (nested ones too) is added to it with its position. */
+export function topForms(src: string, all?: Form[]): Form[] {
   const out: Form[] = [];
   let i = 0;
   const skip = () => {
@@ -28,12 +30,12 @@ export function topForms(src: string): Form[] {
     skip();
     if (i >= src.length) return null;
     if (src[i] === '(') {
-      i++;
+      const from = i++;
       const list: Sx[] = [];
       for (;;) {
         skip();
         if (i >= src.length) return null;
-        if (src[i] === ')') { i++; return list; }
+        if (src[i] === ')') { i++; all?.push({ from, to: i, sx: list }); return list; }
         const x = parse();
         if (x === null) return null;
         list.push(x);
@@ -77,9 +79,17 @@ function setOf(x: Sx, target: Sx, k: number): string[] | null {
   return colors(x.slice(3));
 }
 
+/** (palette #.. ...) with plain colours only (up to the tab's MAX_STOPS) -> its colours. */
+function literal(x: Sx): string[] | null {
+  if (!Array.isArray(x) || x[0] !== 'palette' || x.length < 2 || x.length > MAX_STOPS + 1) return null;
+  const cs = x.slice(1);
+  return cs.every((c) => typeof c === 'string' && HEX_RE.test(c)) ? cs as string[] : null;
+}
+
 /** Every recognised palette in `src`, in order. */
 export function findPalettes(src: string): PaletteSpan[] {
-  const forms = topForms(src);
+  const all: Form[] = [];
+  const forms = topForms(src, all);
   const out: PaletteSpan[] = [];
   const span = (a: number, b: number, stops: string[], t: PaletteTarget) => out.push({ from: forms[a].from, to: forms[b].to, text: src.slice(forms[a].from, forms[b].to), stops, target: t });
   /** Sets of `target` from form j on, at 0, 8, ...: [last form index, colours] filling exactly n, or null. */
@@ -105,6 +115,8 @@ export function findPalettes(src: string): PaletteSpan[] {
         if (r) { span(i, r[0], r[1], { buf: sl.buf, start: sl.start, name }); i = r[0]; }
         continue;
       }
+      const lit = literal(body);
+      if (lit) { span(i, i, lit, { buf: OWN, start: 0, name }); continue; }
       if (Array.isArray(body) && body[0] === 'set' && body.length >= 4) {
         const s2 = slice(body[1]), c = setOf(body, body[1], 0);
         if (s2 && c && c.length === s2.end - s2.start) span(i, i, c, { buf: s2.buf, start: s2.start, name });
@@ -119,5 +131,10 @@ export function findPalettes(src: string): PaletteSpan[] {
       if (r) { span(i, r[0], r[1], { buf: sl.buf, start: sl.start, name: '' }); i = r[0]; }
     }
   }
-  return out;
+  for (const f of all) {                               // (palette ...) elsewhere, unless already part of a span
+    const lit = literal(f.sx);
+    if (!lit || out.some((s) => f.from >= s.from && f.to <= s.to)) continue;
+    out.push({ from: f.from, to: f.to, text: src.slice(f.from, f.to), stops: lit, target: { buf: OWN, start: 0, name: '' } });
+  }
+  return out.sort((a, b) => a.from - b.from);
 }

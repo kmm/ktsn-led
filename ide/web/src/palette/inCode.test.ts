@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { findPalettes, topForms } from './inCode';
-import { paletteCode } from './palette';
+import { OWN, paletteCode } from './palette';
 
 describe('palettes in code', () => {
   it('finds forms and skips comments', () => {
@@ -20,6 +20,9 @@ describe('palettes in code', () => {
       [['#FF0000'], { buf: 3, start: 10, name: '' }],
       [ten, { buf: 1, start: 4, name: 'sky' }],
       [ten, { buf: 2, start: 0, name: '' }],
+      [['#FF0000', '#00FF00'], { buf: OWN, start: 0, name: 'fire' }],
+      [ten, { buf: OWN, start: 0, name: 'sky' }],
+      [ten, { buf: OWN, start: 0, name: '' }],
     ] as const) {
       const code = paletteCode([...stops], t);
       const src = `; before\n(fill (buf O) #000000)\n${code}(fill-grad (buf O) (slice (buf G0) 0 3))\n`;
@@ -45,5 +48,14 @@ describe('palettes in code', () => {
   it('finds several, in order', () => {
     const src = paletteCode(['#FF0000', '#0000FF'], { buf: 0, start: 0, name: 'a' }) + '(fill (buf O) #000000)\n' + paletteCode(['#00FF00'], { buf: 1, start: 5, name: '' });
     expect(findPalettes(src).map((p) => p.target.buf)).toEqual([0, 1]);
+  });
+  it('finds (palette …) inside other code, and leaves computed ones alone', () => {
+    const src = '(fill-grad (buf O) (list-pick (list (palette #FF0000 #FFFF00) (palette #000080 #00FFFF)) 10))\n' +
+      '(def k (palette #FF0000 (lerp #000000 #FFFFFF 0.5)))\n(def p (palette #010203))';
+    const found = findPalettes(src);
+    expect(found.map((f) => f.text)).toEqual(['(palette #FF0000 #FFFF00)', '(palette #000080 #00FFFF)', '(def p (palette #010203))']);
+    expect(found[0].target).toEqual({ buf: OWN, start: 0, name: '' });
+    expect(found[2].target).toEqual({ buf: OWN, start: 0, name: 'p' });
+    for (const f of found) expect(src.slice(f.from, f.to)).toBe(f.text);
   });
 });

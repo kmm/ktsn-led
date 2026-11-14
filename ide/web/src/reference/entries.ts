@@ -27,7 +27,7 @@ export interface Entry {
 export type Category = 'Buffers' | 'Filling' | 'Pixels' | 'Blending' | 'Motion' | 'Logic' | 'Math' | 'Environment' | 'Time' | 'Variables' | 'Lists' | 'Functions' | 'Text' | 'Displays' | 'Inputs' | 'Automation';
 export const CATEGORIES: Category[] = ['Buffers', 'Filling', 'Pixels', 'Blending', 'Motion', 'Logic', 'Math', 'Environment', 'Time', 'Variables', 'Lists', 'Functions', 'Text', 'Displays', 'Inputs', 'Automation'];
 /** Words the compiler handles itself (not natives): documented, but not in the compiler's native table. */
-export const KEYWORDS = ['def', 'defn', 'fn', 'use', 'list'];
+export const KEYWORDS = ['def', 'defn', 'fn', 'use', 'list', 'palette'];
 
 const range: ArgSpec[] = [
   { name: 'start', type: 'int', desc: 'first pixel of the range; negative counts from the end', optional: true, def: '0' },
@@ -84,6 +84,17 @@ export const ENTRIES: Entry[] = [
       'length. All four keep their contents from one frame to the next.\n\nG0..G7 are shared by every channel and by the ' +
       'autoexec program: a good place for palettes. Lower-case ids work too.',
     example: '(fill (buf X) #0000FF)\n(fill (buf O) #000000)\n(copy (buf O) (buf X) 0 10)    ; first 10 pixels from X',
+  },
+  {
+    name: 'palette', category: 'Buffers', summary: 'A list of colours as a buffer of its own: a palette for fill-grad, fill-pat or grad-map.',
+    args: [{ name: 'color', type: 'color', desc: 'the colours in order (up to 255); they may be computed', many: 255 }],
+    returns: 'buffer (its own pixels, one per colour)',
+    details: 'No G buffer to lay out: the colours live with the program. Give it a name with def, in the program or in a ' +
+      'library program shared by many (see use), or write it straight where a buffer goes.\n\nEvery time it runs it is ' +
+      'filled from its colours again, so writing into it (scale, blend …) changes only that copy, until it runs again ' +
+      '(a def at the top level: the next frame). A colour may be any expression, e.g. (lerp a b k).\n\nThe Palette tab ' +
+      'writes (palette …) code and edits the ones in your program (the ▦ mark).',
+    example: '(def fire (palette #FF0000 #FF8000 #FFFF00))\n(def sea (palette #000080 #0080FF #00FFFF))\n(fill-grad (buf O) (list-pick (list fire sea) 10))',
   },
   {
     name: 'slice', category: 'Buffers', summary: 'A view of part of a buffer: a range, optionally every n-th pixel or reversed.',
@@ -749,7 +760,8 @@ export const ENTRIES: Entry[] = [
       'every frame; nothing carries over between frames. A name can be defined again, also from its own old value, ' +
       '(def n (+ n 1)), but keeps its kind: a color can\'t become a number.\n\nIn a function body, def makes a local ' +
       'variable, unless a variable of that name is already visible: then it is assigned. That is how a (fn …) passed to ' +
-      'repeat adds up a total in a variable outside it. Up to 64 variables, parameters and locals per program.',
+      'repeat adds up a total in a variable outside it. Up to 64 variables, parameters and locals per program.\n\nA library ' +
+      'program may contain defs too: see use.',
     example: '(def pal (set (slice (buf G0) 0 2) 0 #FF0000 #0000FF))\n(def w (* 2 (env second)))\n(fill (buf O) #000000)\n(fill-grad (slice (buf O) 0 (min 50 w)) pal)',
   },
 
@@ -822,18 +834,22 @@ export const ENTRIES: Entry[] = [
     example: '(def k 0.5)\n(fill (buf O) #FF8000)\n(map-px (buf O) (buf O) (fn (c:color) (lerp #000000 c k)))',
   },
   {
-    name: 'use', category: 'Functions', summary: 'Make the functions of a library program available in this program.',
+    name: 'use', category: 'Functions', summary: 'Make the functions and named values of a library program available in this program.',
     args: [{ name: 'name', type: 'name', desc: 'a program in the library' }],
     returns: 'nothing',
-    details: 'Only at the top level, anywhere in the program. The library program may contain only defn and use. Its ' +
+    details: 'Only at the top level, anywhere in the program. The library program may contain only def, defn and use. Its ' +
       'functions, and those of the libraries it uses, can then be called like the program\'s own; only the ones actually ' +
-      'reached are compiled in, and they count toward the program\'s limits.\n\nThe functions are copied into the program ' +
+      'reached are compiled in, and they count toward the program\'s limits.\n\nIts defs give names to values: palettes, ' +
+      'colours, numbers, lists. The program can read them like its own variables (not from inside a defn, which sees only ' +
+      'its parameters). Only the defs the program names, directly or through other library defs, are compiled in; they run ' +
+      'first, every frame, the libraries a library uses before it. The program can\'t define a name a library defines, and ' +
+      'two libraries can\'t both define a name the program uses.\n\nThe functions are copied into the program ' +
       'when it compiles. On a board, saving or deleting a library program first compiles the running programs that use ' +
       'libraries against the change: if one would break, the change is refused and the error says which. Otherwise they ' +
       'switch to the new functions.\n\nIn the IDE, use reads the connected board\'s library. With no board connected it ' +
       'reads the local library by name (a name in two folders is an error). Uploading sends the libraries a selection ' +
       'uses first. Errors inside a library are shown at its use, with the library\'s own line number.',
-    example: '; needs a library program named shades, containing:\n;   (defn dim (c:color k:decimal) (lerp #000000 c k))\n(use shades)\n(fill (buf O) (dim #FF8000 0.25))',
+    example: '; needs a library program named shades, containing:\n;   (defn dim (c:color k:decimal) (lerp #000000 c k))\n;   (def fire (set (slice (buf G0) 0 3) 0 #FF0000 #FF8000 #FFFF00))\n;   (def sea (set (slice (buf G0) 3 6) 0 #000080 #0080FF #00FFFF))\n;   (def pals (list fire sea))\n(use shades)\n(fill-grad (buf O) (list-pick pals 60))\n(scale (buf O) 0.5)',
   },
   {
     name: 'map-px', category: 'Functions', summary: 'Compute every pixel of dst with a function of the matching src pixel (and its index).',

@@ -22,7 +22,8 @@ typedef struct ast {
 typedef struct { const char *src, *p; arena_t *tmp; char *err; size_t errlen; const char *main, *unit, *use_at; } ps_t;
 /* Names -> slots. A slot keeps its first type and belongs to the scope it was made in (slots are never reused). */
 /* A list variable has no value at run time: its uses are the list itself (a constant), so `list` is set instead. */
-typedef struct { char name[DSL_VAR_NAME_MAX + 1]; uint8_t type; uint16_t scope; const dsl_list_t *list; } var_t;
+/* unit: where the def is (0 = the program, else a library): a library's names can't be defined again elsewhere. */
+typedef struct { char name[DSL_VAR_NAME_MAX + 1]; uint8_t type, unit; uint16_t scope; const dsl_list_t *list; } var_t;
 /* Open scopes, innermost last: the program's top level, a defn body (a barrier: nothing outside it is visible), and
  * (fn ...) bodies inside them (they see the scopes around them up to the barrier). */
 typedef struct { uint16_t id; bool barrier; ufn_t *fn; } scope_t;
@@ -31,7 +32,15 @@ typedef struct { ufn_t *f; const char *src; uint64_t calls; uint8_t state, unit;
 /* A text the program is made of: 0 is the program, the rest the libraries it uses (each loaded once). */
 typedef struct { char name[DSL_VAR_NAME_MAX + 1]; char *src; const char *use_at; uint8_t state; } unit_t;
 /* Tables too large for the compiling task's stack: one malloc per compile, vars and fns cleared per pass. */
-typedef struct { var_t vars[DSL_MAX_VARS]; fnent_t fns[DSL_MAX_FNS]; unit_t units[DSL_MAX_USES + 1]; uint8_t nunits; } cc_tables_t;
+/* A (def ...) at the top level of a library: compiled into a program only if the program (or another such def it
+ * needs) names it. h = hash of the name (a collision only compiles one more def). */
+#define LIB_DEFS_MAX 255
+typedef struct { const char *at; uint32_t h; uint8_t unit; bool need, seen; } libdef_t;
+typedef struct {
+    var_t vars[DSL_MAX_VARS]; fnent_t fns[DSL_MAX_FNS]; unit_t units[DSL_MAX_USES + 1]; uint8_t nunits;
+    uint8_t post[DSL_MAX_USES + 1], npost;       /* the libraries, each after those it uses (their defs run first) */
+    libdef_t ldefs[LIB_DEFS_MAX]; uint16_t nldefs;
+} cc_tables_t;
 typedef struct {
     channel_t *ch; arena_t *pa; ps_t *ps; uint16_t nnodes;
     var_t *vars; uint8_t nvars;
@@ -41,6 +50,7 @@ typedef struct {
     ufn_t *cur;                                  /* defn whose body is being compiled; NULL at the top level */
     bool tail;                                   /* the call compiled next is in tail position of cur */
     uint16_t nlists;                             /* (list ...) forms so far: each one's id */
+    uint8_t unit;                                /* the unit whose top-level defs are being compiled */
 } cc_t;
 
 static void perr(ps_t *ps, const char *at, const char *fmt, ...)
@@ -253,6 +263,7 @@ static bool compile_list(cc_t *cc, const ast_t *lst, arg_t *out);
 static bool is_form(const ast_t *e, const char *head);
 /* (list ...), unless the program defines its own function named list (written before 0.25.0: it keeps working). */
 #define is_list_form(cc, e) (is_form(e, "list") && find_fn(cc, "list") < 0)
+static node_t *compile_palette(cc_t *cc, const ast_t *lst);
 #define LIST_ONLY "a list goes to list-nth, list-len, list-pick or play-pick, or into a variable with def"
 static int find_fn(const cc_t *cc, const char *name);
 
@@ -424,6 +435,7 @@ static node_t *compile_call(cc_t *cc, const ast_t *lst)
     if (!strcmp(h->s, "use")) { perr(ps, lst->at, "use only works at the top level of a program"); return NULL; }
     if (!strcmp(h->s, "fn")) { perr(ps, lst->at, "fn makes a function to pass to map-px or repeat; it can't be used here"); return NULL; }
     if (!strcmp(h->s, "list") && find_fn(cc, "list") < 0) { perr(ps, lst->at, "%s", LIST_ONLY); return NULL; }
+    if (!strcmp(h->s, "palette") && find_fn(cc, "palette") < 0) return compile_palette(cc, lst);
     const native_def_t *def = dsl_find_native(h->s);
     const ufn_t *uf = NULL;                              /* a user function call (not a self tail call) */
     if (!def) {
@@ -530,6 +542,7 @@ static int new_var(cc_t *cc, const ast_t *name, uint8_t type)
     var_t *v = &cc->vars[cc->nvars];
     strcpy(v->name, name->s);
     v->type = type;
+    v->unit = cc->unit;
     v->scope = cc->scopes[cc->nscopes - 1].id;
     return cc->nvars++;
 }
@@ -547,6 +560,12 @@ static node_t *compile_def(cc_t *cc, const ast_t *lst)
         return NULL;
     }
     if (!name_free(cc, name)) return NULL;
+    int had = find_var(cc, name->s);
+    if (had >= 0 && cc->vars[had].unit != cc->unit) {
+        perr(ps, name->at, "'%s' is already defined in library '%s'; give it another name", name->s,
+             cc->units[cc->vars[had].unit ? cc->vars[had].unit : cc->unit].name);
+        return NULL;
+    }
     arg_t val;
     if (is_list_form(cc, expr)) {                        /* a name for the list: no slot value, uses get the list */
         if (find_var(cc, name->s) >= 0) { perr(ps, name->at, "'%s' is already defined; a list can't change, give it another name", name->s); return NULL; }
@@ -734,6 +753,35 @@ static bool compile_list(cc_t *cc, const ast_t *lst, arg_t *out)
     return true;
 }
 
+/* (palette c1 c2 ...): a buffer of its own in the program block (no G buffer to lay out), refilled from the colours
+ * whenever it runs. Up to DSL_LIST_MAX colours, like a list; the colours may be computed. */
+static node_t *compile_palette(cc_t *cc, const ast_t *lst)
+{
+    ps_t *ps = cc->ps;
+    int n = 0;
+    for (const ast_t *a = lst->child->next; a; a = a->next) n++;
+    if (!n) { perr(ps, lst->at, "a palette needs at least one colour: (palette #FF0000 #0000FF)"); return NULL; }
+    if (n > DSL_LIST_MAX) { perr(ps, lst->at, "too many colours in a palette (max %d)", DSL_LIST_MAX); return NULL; }
+    dsl_list_t *l = arena_alloc(cc->pa, sizeof *l + (size_t)n * sizeof(arg_t));
+    pixel_t *px = l ? arena_alloc(cc->pa, (size_t)n * sizeof *px) : NULL;
+    if (!px) { perr(ps, lst->at, "program too large"); return NULL; }
+    memset(l, 0, sizeof *l + (size_t)n * sizeof(arg_t));
+    memset(px, 0, (size_t)n * sizeof *px);
+    l->n = (uint8_t)n;
+    l->type = V_COLOR;                                   /* id stays 0: not a list (list-pick seeds keep their numbers) */
+    int i = 0;
+    for (const ast_t *a = lst->child->next; a; a = a->next, i++) {
+        if (!compile_arg(cc, a, A_COLOR, false, &l->items[i])) return NULL;
+        if (l->items[i].node && l->items[i].node->stack > l->stack) l->stack = l->items[i].node->stack;
+    }
+    node_t *nd = new_node(cc, &dsl_palette, V_BUF, 2, lst->at);
+    if (!nd) return NULL;
+    nd->args[0].val.type = V_LIST; nd->args[0].val.u.list = l;
+    nd->args[1].val.type = V_BUF;  nd->args[1].val.u.buf = (bufref_t){ .px = px, .len = (uint16_t)n, .stride = 1 };
+    nd->stack = STK_LAZY + l->stack;
+    return nd;
+}
+
 /* First look at a (defn name (p:type ...) body...): name and signature, so calls anywhere can be checked. */
 static bool declare_fn(cc_t *cc, const ast_t *e, uint8_t unit)
 {
@@ -818,6 +866,25 @@ static bool order_fns(cc_t *cc, int i, uint8_t *order, uint8_t *n)
     return true;
 }
 
+static uint32_t name_hash(const char *s)
+{
+    uint32_t h = 2166136261u;
+    while (*s) h = (h ^ (uint8_t)*s++) * 16777619u;
+    return h;
+}
+
+/* Mark the library defs a form names (any symbol with a def's name: a few extra are harmless). */
+static void ldef_refs(cc_tables_t *tb, const ast_t *a)
+{
+    if (a->kind == K_SYM) {
+        uint32_t h = name_hash(a->s);
+        for (int i = 0; i < tb->nldefs; i++) if (tb->ldefs[i].h == h) tb->ldefs[i].need = true;
+        return;
+    }
+    if (a->kind != K_LIST) return;
+    for (const ast_t *x = a->child; x; x = x->next) ldef_refs(tb, x);
+}
+
 /* Load the libraries unit u uses, depth first (each once, so a library reached twice is fine; a circle is an error).
  * Also the first look at every form's syntax. tmem grows to fit the largest text. */
 static bool scan_unit(cc_tables_t *tb, int u, const char *top_at, uint8_t **tmem, size_t *tsz, char *ebuf, size_t elen)
@@ -865,13 +932,14 @@ static bool scan_unit(cc_tables_t *tb, int u, const char *top_at, uint8_t **tmem
                 if (!scan_unit(tb, k, next_top, tmem, tsz, ebuf, elen)) return false;
                 arena_init(&tmp, *tmem, *tsz);                   /* tmem may have moved */
             }
-        } else if (u && !is_form(e, "defn")) {
-            perr(&ps, e->at, "a library for 'use' may contain only defn and use");
+        } else if (u && !is_form(e, "defn") && !is_form(e, "def")) {
+            perr(&ps, e->at, "a library for 'use' may contain only def, defn and use");
             return false;
         }
         arena_reset(&tmp);
     }
     un->state = FN_DONE;
+    if (u) tb->post[tb->npost++] = (uint8_t)u;
     return true;
 }
 
@@ -905,6 +973,24 @@ static program_t *compile_pass(channel_t *ch, const char *src, size_t cap, uint8
             arena_reset(&tmp);
         }
     }
+    tb->nldefs = 0;                                      /* the libraries' defs, in the order they run */
+    for (int k = 0; k < tb->npost; k++) {
+        int u = tb->post[k];
+        enter_unit(&cc, u);
+        ps.p = tb->units[u].src;
+        for (;;) {
+            skip_ws(&ps);
+            if (!*ps.p) break;
+            ast_t *e = parse_expr(&ps, 0);
+            if (!e) goto fail;
+            const ast_t *nm = is_form(e, "def") ? e->child->next : NULL;
+            if (nm) {
+                if (tb->nldefs >= LIB_DEFS_MAX) { perr(&ps, e->at, "too many defs in the libraries used (max %d)", LIB_DEFS_MAX); goto fail; }
+                tb->ldefs[tb->nldefs++] = (libdef_t){ .at = e->at, .h = nm->kind == K_SYM ? name_hash(nm->s) : 0, .unit = (uint8_t)u };
+            }
+            arena_reset(&tmp);
+        }
+    }
     uint64_t roots = 0;                                  /* 2: who calls whom, and what the program itself needs */
     enter_unit(&cc, 0);
     ps.p = src;
@@ -913,8 +999,21 @@ static program_t *compile_pass(channel_t *ch, const char *src, size_t cap, uint8
         if (!*ps.p) break;
         ast_t *e = parse_expr(&ps, 0);
         if (!e) goto fail;
-        if (!is_form(e, "defn") && !is_form(e, "use")) fn_refs(&cc, e, &roots, -1, NULL);
+        if (!is_form(e, "defn") && !is_form(e, "use")) { fn_refs(&cc, e, &roots, -1, NULL); ldef_refs(tb, e); }
         arena_reset(&tmp);
+    }
+    for (bool more = true; more; ) {                     /* library defs the needed ones name, and their functions */
+        more = false;
+        for (int i = 0; i < tb->nldefs; i++) {
+            libdef_t *d = &tb->ldefs[i];
+            if (!d->need || d->seen) continue;
+            d->seen = more = true;
+            enter_unit(&cc, d->unit);
+            const ast_t *e = parse_at(&cc, d->at);
+            fn_refs(&cc, e, &roots, -1, NULL);
+            ldef_refs(tb, e);
+            arena_reset(&tmp);
+        }
     }
     for (int i = 0; i < cc.nfns; i++) {
         if (cc.fns[i].unit == 0) roots |= 1ull << i;
@@ -939,7 +1038,18 @@ static program_t *compile_pass(channel_t *ch, const char *src, size_t cap, uint8
         if (!ok) goto fail;
         fe->compiled = true;
     }
-    node_t **tail = &prog->head;                         /* 4: the program */
+    node_t **tail = &prog->head;                         /* 4: the library defs it needs, then the program */
+    for (int i = 0; i < tb->nldefs; i++) {
+        if (!tb->ldefs[i].need) continue;
+        enter_unit(&cc, tb->ldefs[i].unit);
+        cc.unit = tb->ldefs[i].unit;
+        node_t *n = compile_def(&cc, parse_at(&cc, tb->ldefs[i].at));
+        arena_reset(&tmp);
+        if (!n) goto fail;
+        if (n->stack > prog->stack) prog->stack = n->stack;
+        *tail = n; tail = &n->next;
+    }
+    cc.unit = 0;
     enter_unit(&cc, 0);
     ps.p = src;
     for (;;) {

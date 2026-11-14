@@ -166,6 +166,18 @@ export function visibleFunctions(src: string, uses: UseSources): UserFn[] {
   }
   return out;
 }
+/** Names the libraries a program uses (directly or not) define with (def name …), with the library's name. */
+export function libraryDefs(src: string, uses: UseSources): { name: string; lib: string }[] {
+  const out: { name: string; lib: string }[] = [], seen = new Set<string>(), todo = usedNames(src);
+  for (let n = todo.pop(); n !== undefined; n = todo.pop()) {
+    const lib = uses.get(n);
+    if (seen.has(n) || typeof lib !== 'string') continue;
+    seen.add(n);
+    for (const m of lib.matchAll(/\(def\s+([^\s();]+)/g)) out.push({ name: m[1], lib: n });
+    todo.push(...usedNames(lib));
+  }
+  return out;
+}
 const fnWhere = (f: UserFn) => (f.lib ? `from library ${f.lib}` : `defined on line ${f.line}`);
 
 /** The program's (defn name (params) …) forms: name, parameter list as written, line (1-based), and the comment
@@ -217,7 +229,9 @@ function completer(core: Core) {
     if (/\(buf\s+$/.test(before)) return { from: word.from, options: BUFFER_IDS.map((b) => ({ label: b, type: 'constant' })) };
     if (/\(env\s+$/.test(before)) return { from: word.from, options: ENV_NAMES.map((e) => ({ label: e, type: 'property' })) };
     const vars = [...doc.matchAll(/\(def\s+([^\s();]+)/g)].map((m) => m[1]).concat(paramNames(doc));
+    const libVars = libraryDefs(doc, core.useSources()).filter((d) => !vars.includes(d.name));
     return { from: word.from, options: [...new Set(vars)].map((v) => ({ label: v, type: 'variable' }))
+      .concat(libVars.map((d) => ({ label: d.name, type: 'variable', info: `from library ${d.lib}` })))
       .concat(fns.map((f) => ({ label: f.name, type: 'function', detail: f.params, info: f.doc || fnWhere(f) })))
       .concat(['t', 'nil', '_'].map((a) => ({ label: a, type: 'constant' }))) };
   };

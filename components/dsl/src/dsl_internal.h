@@ -18,6 +18,9 @@ const native_def_t *dsl_native_at(int i);
 extern const native_def_t dsl_var_set, dsl_var_get;
 /* A constant as a node (a function body form that is a literal or a folded call); node->ret = its type. */
 extern const native_def_t dsl_const;
+/* (palette c ...): arg 0 a V_LIST of the colours, arg 1 a V_BUF over n pixels in the program block. Every run fills
+ * the pixels from the colours and returns the view, so writes into it last until it runs again. */
+extern const native_def_t dsl_palette;
 
 /* ---- user functions: (defn name (p:type ...) body...) and (fn (p:type ...) body...) ----
  * Parameters and locals are slots of the program (no call stack): functions never call each other in a circle, so a

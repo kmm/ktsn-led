@@ -224,6 +224,7 @@ Programs sent over HTTP may be up to 3999 characters, span several lines and con
 ```
     (buf <id>)                                  id: X Y Z O  or G0..G7        -> buffer
     (slice <buf> [start] [end] [step])          every step-th of [start, end) -> buffer
+    (palette #c1 #c2 ...)                       up to 255 colours as a buffer of its own (a palette) -> buffer
     (fill <buf> <#RRGGBB[WW]> [start] [end])    fills [start, end)            -> buf
     (scale <buf> <0.0..1.0> [start] [end])      multiply brightness (rounds down, so fades reach black) -> buf
     (invert <buf> [start] [end])                each channel x -> 255 - x (e.g. a seg mask) -> buf
@@ -269,7 +270,7 @@ Programs sent over HTTP may be up to 3999 characters, span several lines and con
     (def <name> <value>)                        a variable (program or function body top level)
     (defn <name> (<p:type>...) <body>...)       a function; types int decimal color bool buf str
     (fn (<p:type>...) <body>...)                a function written where one is passed
-    (use <name>)                                the functions of a library program (top level only)
+    (use <name>)                                the functions and defs of a library program (top level only)
     (map-px <dst> <src> <f> [start] [end])      dst[i] = (f src[i] i)          -> dst
     (repeat <n> <f>)                            f with i = 0 .. n-1
     "text"                                      a string (one line, up to 255 characters; \" and \\ escapes)
@@ -321,8 +322,12 @@ sees only its parameters (not the program's variables). It may call itself as it
 `(defn wrap (x:int n:int) (if (ge x n) (wrap (- x n) n) x))`; other recursion is a compile error. `fn` writes a
 function in place and sees the variables around it: `(map-px (buf O) (buf O) (fn (c:color i:int) (if (lt i 5) c #000000)))`,
 `(def n 0) (repeat 4 (fn (i:int) (def n (+ n i))))`. Each map-px pixel is a call, so watch `stat` on long strings.
-To share functions, put only `defn`s (and `use`s) in a library program, say `shades`, and write `(use shades)` at the
-top level of the programs that want them. The functions are copied in when the program compiles. Saving a library
+To share functions and named values, put only `defn`s, `def`s (and `use`s) in a library program, say `shades`, and
+write `(use shades)` at the top level of the programs that want them. The functions are copied in when the program
+compiles. A library's defs name palettes, colours, numbers or lists for every program that uses it, e.g.
+`(def fire (palette #FF0000 #FF8000 #FFFF00))` and `(def pals (list fire sea))`, then
+`(fill-grad (buf O) (list-pick pals 300))` in a program; only the defs a program names are compiled in, and they run
+before the program's own forms. A program can't redefine a library's name. Saving a library
 program re-compiles the running programs that use it; if one would break, the save is refused with its error.
 Arithmetic keeps ints as ints; any decimal makes the result a decimal (`(/ 7 2)` is 3, `(/ 7 2.0)` is 3.5).
 Use `floor`/`round` where an int is needed. A brightness wave: `(scale (buf O) (+ 0.5 (* 0.5 (sin (* (env frame) 3)))))`.

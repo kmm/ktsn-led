@@ -2122,6 +2122,48 @@ static void set_clock(int year, int doy, int h, int m, int sec)
 static bool holds(channel_t *ch, const char *defs, const char *cond);
 static void expect_err(channel_t *ch, const char *src, const char *want);
 
+static void t_palette(channel_t *ch)
+{
+    char e[DSL_ERR_LEN];
+    uint32_t f0 = ch->perf.faults;
+    CHECK(holds(ch, "(def p (palette #FF0000 #00FF00 #0000FF))", "(and (eq (get p 0) #FF0000) (eq (get p 2) #0000FF) (eq (get p 3) #000000))"));
+    CHECK(holds(ch, "(fill-grad (buf X) (palette #FF0000 #0000FF))", "(and (eq (get (buf X) 0) #FF0000) (eq (get (buf X) -1) #0000FF))"));
+    CHECK(holds(ch, "(def k #00FF00) (def p (palette k (lerp #000000 #FF0000 0.5) (if (gt (env frame) -1) #0000FF #FFFFFF)))",
+                "(and (eq (get p 0) #00FF00) (eq (get p 1) #800000) (eq (get p 2) #0000FF))"));         /* computed colours */
+    /* every run refills it: a write lasts until the palette runs again */
+    CHECK(holds(ch, "(defn red () (palette #FF0000 #FF0000)) (def a (red)) (scale a 0.5) (def b (get a 0)) (def c (get (red) 0))",
+                "(and (eq b #7F0000) (eq c #FF0000))"));
+    CHECK(run(ch, "(def p (palette #FF0000)) (fill (buf O) (get p 0)) (scale p 0.5)", e) == 0);
+    channel_render(ch);                                                          /* the next frame starts from the colours again */
+    CHECK(ch->buf[BUF_O][0] == 0xFF0000);
+    CHECK(holds(ch, "(def pals (list (palette #FF0000 #FFFF00) (palette #0000FF #00FFFF)))", "(eq (get (list-nth pals 1) 1) #00FFFF)"));
+    CHECK(holds(ch, "", "(eq (get (slice (palette #010101 #020202 #030303) 1 3) 1) #030303)"));
+    CHECK(holds(ch, "(defn palette (x:int) (* x 2))", "(eq (palette 3) 6)"));          /* a program's own palette function wins */
+    CHECK(ch->perf.faults == f0);
+    {   /* up to 255 colours */
+        char *src = malloc(4096), *p = src;
+        p += sprintf(p, "(def p (palette");
+        for (int i = 0; i < 255; i++) p += sprintf(p, " #%06X", i);
+        sprintf(p, ")) (if (eq (get p 254) #0000FE) (fill (buf O) #00FF00) (fill (buf O) #FF0000))");
+        CHECK(run(ch, src, e) == 0 && ch->buf[BUF_O][0] == 0x00FF00);
+        free(src);
+    }
+    {
+        char *src = malloc(4096), *p = src;
+        p += sprintf(p, "(def p (palette");
+        for (int i = 0; i < 256; i++) p += sprintf(p, " #%06X", i);
+        sprintf(p, "))");
+        CHECK(run(ch, src, e) != 0 && strstr(e, "too many colours in a palette (max 255)"));
+        free(src);
+    }
+    expect_err(ch, "(def p (palette))", "a palette needs at least one colour");
+    expect_err(ch, "(def p (palette #FF0000 \"red\"))", "line 1 col 25:");
+    expect_err(ch, "(def p (palette #FF0000 (fill (buf O) #000000)))", "line 1 col 25:");
+    CHECK(run(ch, "(def l (list #FF0000)) (def p (palette (list-nth l (env frame)))) (fill-grad (buf O) p)", e) == 0);
+    CHECK(run(ch, "(def l (list #FF0000)) (def p (palette #00FF00 (list-nth l (+ 5 (env frame))))) (fill (buf O) (get p 0))", e) == 0
+          && ch->perf.faults > f0);                                              /* an entry that faults: the run faults */
+}
+
 static void t_lists(channel_t *ch)
 {
     char e[DSL_ERR_LEN];
@@ -2514,6 +2556,7 @@ static void t_functions(channel_t *ch)
     ch->deadline_us = 0;
 }
 
+#define LIBDEFS10(p) "(def " p "0 0)(def " p "1 1)(def " p "2 2)(def " p "3 3)(def " p "4 4)(def " p "5 5)(def " p "6 6)(def " p "7 7)(def " p "8 8)(def " p "9 9)"
 /* (use name): a fake board library */
 static const struct { const char *name, *src; } k_libs[] = {
     { "math",   "; helpers\n(defn dbl (x:int) (* x 2))\n(defn quad (x:int) (dbl (dbl x)))" },
@@ -2525,6 +2568,14 @@ static const struct { const char *name, *src; } k_libs[] = {
     { "loop-a", "(use loop-b)" }, { "loop-b", "(use loop-a)" }, { "self", "(use self)" },
     { "syntax", "(defn f () (" }, { "dup", "(defn dbl (y:int) y)" },
     { "circ",   "(defn p () (q)) (defn q () (p))" },
+    { "pal",    "(def fire (set (slice (buf G0) 0 3) 0 #FF0000 #FF8000 #FFFF00))\n(def sea (set (slice (buf G0) 3 6) 0 #000080 #0080FF #00FFFF))\n"
+                "(def pals (list fire sea))\n(def warm #FF8800)\n(def bad-one (nothing-here))" },
+    { "pal2",   "(use pal) (def hot (list-nth pals 1)) (def cnt (twice 3)) (defn twice (x:int) (* x 2))" },
+    { "pal3",   "(def warm #112233)" },
+    { "pal4",   "(def k 3) (defn getk () k)" },
+    { "counter", "(def n 1) (def n (+ n 1))" },
+    { "pal5",   "(def fire (palette #FF0000 #FF8000 #FFFF00)) (def pals (list fire (palette #000080 #00FFFF)))" },
+    { "many",   LIBDEFS10("a") LIBDEFS10("b") LIBDEFS10("c") LIBDEFS10("d") LIBDEFS10("e") LIBDEFS10("f") LIBDEFS10("g") },
     { "l1", "(defn f1 () 1)" }, { "l2", "(defn f2 () 1)" }, { "l3", "(defn f3 () 1)" }, { "l4", "(defn f4 () 1)" },
     { "l5", "(defn f5 () 1)" }, { "l6", "(defn f6 () 1)" }, { "l7", "(defn f7 () 1)" }, { "l8", "(defn f8 () 1)" }, { "l9", "(defn f9 () 1)" },
 };
@@ -2653,6 +2704,17 @@ static void t_use(channel_t *ch)
     CHECK(holds(ch, "(use math) (defn tw (c:color i:int) c) (fill (buf Y) #FF0000) (map-px (buf Y) (buf Y) tw)", "(eq (dbl 2) 4)"));
     CHECK(holds(ch, "(use broken)", "(eq (fine) 1)"));                              /* only what is reached is compiled */
     CHECK(run(ch, "(use circ) (fill (buf O) #000000)", e) == 0);                     /* an unused circle doesn't matter */
+    /* library defs: names for values (palettes, colours, lists), only those the program reaches */
+    CHECK(holds(ch, "(use pal)", "(eq warm #FF8800)"));
+    CHECK(holds(ch, "(use pal)", "(and (eq (get fire 2) #FFFF00) (eq (get sea 0) #000080))"));
+    CHECK(holds(ch, "(use pal)", "(and (eq (list-len pals) 2) (eq (get (list-nth pals 1) 2) #00FFFF))"));
+    CHECK(holds(ch, "(use pal2)", "(and (eq cnt 6) (eq (get hot 1) #0080FF))"));    /* through another library, calling a function */
+    CHECK(holds(ch, "(use counter)", "(eq n 2)"));
+    CHECK(holds(ch, "(use pal5)", "(and (eq (get fire 1) #FF8000) (eq (get (list-nth pals 1) 0) #000080))"));   /* palettes in a library */                                   /* a library may redefine its own */
+    CHECK(holds(ch, "(def w2 warm) (use pal)", "(eq w2 #FF8800)"));                  /* library defs run first */
+    CHECK(run(ch, "(use pal) (fill (buf O) warm)", e) == 0);                         /* bad-one isn't reached */
+    CHECK(run(ch, "(use many) (fill (buf O) #000000 0 g9)", e) == 0);                /* 70 defs, one slot used */
+    CHECK(holds(ch, "(use many)", "(eq (+ a1 g9) 10)"));
 
     static const struct { const char *src, *want; } errs[] = {
         { "(fill (buf O) #000000)\n  (use nope)",          "line 2 col 8: no library program 'nope'" },
@@ -2662,7 +2724,11 @@ static void t_use(channel_t *ch)
         { "(use \"math\")",                                "'use' takes a library program's name" },
         { "(if t (use math))",                             "use only works at the top level" },
         { "(defn f () (use math) 1)",                      "use only works at the top level" },
-        { "\n(use bad)",                                   "line 2 col 1: in bad line 2: a library for 'use' may contain only defn and use" },
+        { "\n(use bad)",                                   "line 2 col 1: in bad line 2: a library for 'use' may contain only def, defn and use" },
+        { "(use pal) (def warm #000000)",                  "line 1 col 16: 'warm' is already defined in library 'pal'; give it another name" },
+        { "(use pal) (use pal3) (fill (buf O) warm)",      "line 1 col 11: in pal3 line 1: 'warm' is already defined in library 'pal'" },
+        { "(use pal) (fill (buf O) #000000 0 (list-len (list bad-one)))", "line 1 col 1: in pal line 5: unknown function 'nothing-here'" },
+        { "(use pal4) (def x (getk))",                     "in pal4 line 1: unknown name 'k'" },     /* functions see only their own names */
         { "(use loop-a)",                                  "'loop-a' uses itself" },
         { "(use self)",                                    "line 1 col 1: in self line 1: 'self' uses itself" },
         { "(use syntax)",                                  "in syntax line 1: unclosed" },
@@ -2910,7 +2976,7 @@ int main(void)
 {
     CHECK(globals_init(&globals, 10) == 0);
     with_channel(t_fill); with_channel(t_scale_and_persistence); with_channel(t_invert); with_channel(t_nesting_globals);
-    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); with_channel(t_lists); with_channel(t_play_pick); t_astro(); t_audio(); with_channel(t_errors); with_channel(t_swap_atomic);
+    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); with_channel(t_lists); with_channel(t_palette); with_channel(t_play_pick); t_astro(); t_audio(); with_channel(t_errors); with_channel(t_swap_atomic);
     t_arena(); t_ws_parallel(); t_gamma(); t_dither(); t_wire(); t_wire_white(); t_wire_wmode(); t_fader(); t_intensity16(); t_px_scale_exhaustive(); t_blend_math(); t_stats();
     for (int i = 0; i < DSL_NUM_GLOBALS; i++) free(globals.buf[i]);
     printf("%d checks, %d failed\n", g_checks, g_fail);

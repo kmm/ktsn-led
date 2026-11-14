@@ -1,4 +1,5 @@
-// Palettes: colour stops stored in a G buffer (G0..G7) with `set`, used by fill-grad / fill-pat / grad-map.
+// Palettes: colour stops as a (palette ...) of the program's own, or stored in a G buffer (G0..G7) with `set`; used by
+// fill-grad / fill-pat / grad-map.
 // Pure helpers: the board's gradient and pattern maths (for the preview), the code that writes a palette, saved palettes.
 import { formatHex, parseHex, type Rgbw } from '../color/colors';
 
@@ -30,7 +31,9 @@ export function pattern(stops: Rgbw[], n: number, stretch = 1): Rgbw[] {
   return Array.from({ length: n }, (_, i) => stops[Math.floor(i / Math.max(1, stretch)) % stops.length]);
 }
 
-export interface PaletteTarget { buf: number; start: number; name: string }   // G0..G7, first index, def name ("" = none)
+/** buf: G0..G7, or OWN for a (palette ...) (start unused); name: a def name ("" = none). */
+export interface PaletteTarget { buf: number; start: number; name: string }
+export const OWN = -1;
 
 /** A DSL variable name, as (def ...) accepts it. */
 export const VAR_NAME = /^[a-zA-Z][a-zA-Z0-9_-]{0,14}$/;
@@ -40,11 +43,18 @@ export const VAR_NAME = /^[a-zA-Z][a-zA-Z0-9_-]{0,14}$/;
 export function paletteCode(stops: string[], t: PaletteTarget): string {
   const n = stops.length;
   if (!n) return '';
-  const slice = `(slice (buf G${t.buf}) ${t.start} ${t.start + n})`;
   const hex = stops.map((s) => formatHex(parseHex(s) ?? { r: 0, g: 0, b: 0, w: 0 }));
+  const usable = VAR_NAME.test(t.name) && !['t', 'nil', '_'].includes(t.name);
+  if (t.buf === OWN) {                                  // (palette ...): 8 colours a line; no newline after a bare one
+    const rows: string[] = [];
+    for (let i = 0; i < n; i += SET_MAX) rows.push(hex.slice(i, i + SET_MAX).join(' '));
+    const lit = `(palette ${rows.join('\n  ')})`;
+    return usable ? `(def ${t.name} ${lit})\n` : lit;
+  }
+  const slice = `(slice (buf G${t.buf}) ${t.start} ${t.start + n})`;
   const sets: string[] = [];
   for (let i = 0; i < n; i += SET_MAX) sets.push(`${i} ${hex.slice(i, i + SET_MAX).join(' ')}`);
-  const name = VAR_NAME.test(t.name) && !['t', 'nil', '_'].includes(t.name) ? t.name : '';
+  const name = usable ? t.name : '';
   if (sets.length === 1) return name ? `(def ${name} (set ${slice} ${sets[0]}))\n` : `(set ${slice} ${sets[0]})\n`;
   const target = name || slice;
   return (name ? `(def ${name} ${slice})\n` : '') + sets.map((s) => `(set ${target} ${s})\n`).join('');

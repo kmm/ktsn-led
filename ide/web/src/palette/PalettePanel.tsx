@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ColorPicker } from '../color/ColorPicker';
 import { parseHex, swatchCss, useFavorites } from '../color/colors';
-import { gradient, loadPalettes, MAX_STOPS, paletteCode, type PaletteTarget, pattern, type SavedPalette, savePalettes, VAR_NAME } from './palette';
+import { gradient, loadPalettes, MAX_STOPS, OWN, paletteCode, type PaletteTarget, pattern, type SavedPalette, savePalettes, VAR_NAME } from './palette';
 
 interface Props {
   /** Put the generated code at the cursor of the active tab. */
@@ -18,7 +18,7 @@ interface Props {
 }
 
 const CURRENT = 'ktsn-led.ide.palette.current';
-const START: { stops: string[]; target: PaletteTarget } = { stops: ['#FF0000', '#FFFF00', '#0000FF'], target: { buf: 0, start: 0, name: 'pal' } };
+const START: { stops: string[]; target: PaletteTarget } = { stops: ['#FF0000', '#FFFF00', '#0000FF'], target: { buf: OWN, start: 0, name: 'pal' } };
 
 function loadCurrent(): typeof START {
   try {
@@ -29,7 +29,7 @@ function loadCurrent(): typeof START {
 }
 
 /** The Palette tab: build a palette from colour stops (same picker and favourites as the editor), see it as a gradient
- *  (fill-grad) or a repeating pattern (fill-pat), and get the code that stores it in a G buffer. */
+ *  (fill-grad) or a repeating pattern (fill-pat), and get the code for it: a (palette …) or sets on a G buffer. */
 export function PalettePanel({ onInsert, request, linked, onApply, onUnlink, applyMsg }: Props) {
   const [{ stops, target }, setCur] = useState(loadCurrent);
   const [sel, setSel] = useState(0);
@@ -40,6 +40,9 @@ export function PalettePanel({ onInsert, request, linked, onApply, onUnlink, app
   const [saved, setSaved] = useState<SavedPalette[]>(() => loadPalettes());
   const [fav] = useFavorites();
   const [msg, setMsg] = useState('');
+  /* Linked to a (palette …) written inside other code: applying writes a bare (palette …) whatever is chosen below
+   * (a def or sets can't go inside a call). */
+  const inline = !!linked && request?.target.buf === OWN && !request.target.name;
 
   useEffect(() => { try { localStorage.setItem(CURRENT, JSON.stringify({ stops, target })); } catch { /* not remembered */ } }, [stops, target]);
   useEffect(() => {
@@ -73,7 +76,7 @@ export function PalettePanel({ onInsert, request, linked, onApply, onUnlink, app
   const rgbw = useMemo(() => stops.map((s) => parseHex(s)!), [stops]);
   const shown = mode === 'gradient' ? gradient(rgbw, len) : pattern(rgbw, len, stretch);
   const code = paletteCode(stops, target);
-  const overflow = target.start + stops.length > 256;
+  const overflow = target.buf !== OWN && target.start + stops.length > 256;
   const badName = target.name !== '' && !VAR_NAME.test(target.name);
 
   const saveAs = () => {
@@ -98,8 +101,9 @@ export function PalettePanel({ onInsert, request, linked, onApply, onUnlink, app
         <div className="pal-link">
           <span>Editing the palette in <b>{linked}</b></span>
           <div className="controls">
-            <button className="primary" onClick={() => onApply(code.trimEnd())} disabled={overflow}
-              title="Replace that palette code with this one (undo with Ctrl/Cmd+Z in the editor)">Apply to code</button>
+            <button className="primary" onClick={() => onApply(inline ? paletteCode(stops, { buf: OWN, start: 0, name: '' }) : code.trimEnd())}
+              disabled={overflow && !inline}
+              title={inline ? 'Replace that (palette …) with these colours (undo with Ctrl/Cmd+Z in the editor)' : 'Replace that palette code with this one (undo with Ctrl/Cmd+Z in the editor)'}>Apply to code</button>
             <button onClick={onUnlink} title="Stop editing that code; Insert / Copy still work">Unlink</button>
           </div>
           {applyMsg && <span className="muted small">{applyMsg}</span>}
@@ -146,11 +150,12 @@ export function PalettePanel({ onInsert, request, linked, onApply, onUnlink, app
 
       <h3>Code</h3>
       <div className="controls">
-        <label>buffer
+        <label title="(palette …): the program's own colours, no G buffer needed; G0..G7: stored with set (for programs that read the G buffer)">as
           <select value={target.buf} onChange={(e) => setTarget({ buf: +e.target.value })}>
+            <option value={OWN}>(palette …)</option>
             {Array.from({ length: 8 }, (_, k) => <option key={k} value={k}>G{k}</option>)}
           </select></label>
-        <label>from <input type="number" min={0} max={255} value={target.start} onChange={(e) => setTarget({ start: Math.max(0, Math.min(255, +e.target.value || 0)) })} /></label>
+        {target.buf !== OWN && <label>from <input type="number" min={0} max={255} value={target.start} onChange={(e) => setTarget({ start: Math.max(0, Math.min(255, +e.target.value || 0)) })} /></label>}
         <label title="A (def ...) name programs can use for the palette; empty: none">name <input className="pal-name" value={target.name} onChange={(e) => setTarget({ name: e.target.value.trim() })} /></label>
       </div>
       {overflow && <p className="bad small">G buffers have 256 pixels: from {target.start} + {stops.length} stops goes past the end.</p>}
@@ -158,7 +163,7 @@ export function PalettePanel({ onInsert, request, linked, onApply, onUnlink, app
       <pre className="code pal-code">{code}</pre>
       <div className="controls">
         <button className="primary" onClick={() => { onInsert(code); setMsg('inserted at the cursor of the active tab'); }} disabled={overflow}
-          title="Into the active tab at the cursor (G buffers persist: the autoexec is a good place; or keep it in the program)">Insert at cursor</button>
+          title="Into the active tab at the cursor ((palette …) belongs in the program or a library; G buffers persist, so set them in the autoexec or the program)">Insert at cursor</button>
         <button onClick={() => { void navigator.clipboard?.writeText(code).then(() => setMsg('copied'), () => setMsg('could not copy')); }}>Copy</button>
         {msg && <span className="muted small">{msg}</span>}
       </div>

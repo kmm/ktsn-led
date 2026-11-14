@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { NO_SKY } from '../core/env';
 import { loadCore } from '../core/ktsnLed';
 import { parseHex } from '../color/colors';
-import { gradient, loadPalettes, paletteCode, pattern } from './palette';
+import { gradient, loadPalettes, OWN, paletteCode, pattern } from './palette';
 
 const c = (s: string) => parseHex(s)!;
 
@@ -30,6 +30,13 @@ describe('palettes', () => {
     expect(paletteCode(['#FF0000'], { buf: 0, start: 0, name: 'nil' })).toBe('(set (slice (buf G0) 0 1) 0 #FF0000)\n');   // not a usable name
     expect(paletteCode([], { buf: 0, start: 0, name: 'p' })).toBe('');
   });
+  it('writes a (palette …): 8 colours a line, def when named, no newline after a bare one', () => {
+    expect(paletteCode(['#FF0000', '#0000ff'], { buf: OWN, start: 7, name: 'pal' })).toBe('(def pal (palette #FF0000 #0000FF))\n');
+    expect(paletteCode(['#FF0000'], { buf: OWN, start: 0, name: '' })).toBe('(palette #FF0000)');
+    const ten = Array.from({ length: 10 }, (_, i) => `#0000${(i * 16).toString(16).padStart(2, '0')}`);
+    expect(paletteCode(ten, { buf: OWN, start: 0, name: '' }))
+      .toBe('(palette #000000 #000010 #000020 #000030 #000040 #000050 #000060 #000070\n  #000080 #000090)');
+  });
   it('loads saved palettes, ignoring broken entries', () => {
     const s = { getItem: () => JSON.stringify([{ name: 'fire', stops: ['#FF0000', '#FFFF00'] }, { name: 'bad', stops: ['nope'] }, 7]) };
     expect(loadPalettes(s)).toEqual([{ name: 'fire', stops: ['#FF0000', '#FFFF00'] }]);
@@ -51,5 +58,15 @@ describe('palette code on the real compiler', () => {
     const g2 = core.buffer('G2');
     expect([...g2.slice(5, 16)].map((p) => p >>> 0)).toEqual(stops.map((s) => { const c = parseHex(s)!; return ((c.w << 24) | (c.r << 16) | (c.g << 8) | c.b) >>> 0; }));
     expect(g2[4]).toBe(0);
+  });
+  it('compiles (palette …) code, named and inline, and fill-grad uses it as shown', async () => {
+    const core = await loadCore();
+    core.init(20);
+    const stops = Array.from({ length: 11 }, (_, i) => `#${(i * 20).toString(16).padStart(2, '0')}0000`);
+    expect(core.check(paletteCode(stops, { buf: OWN, start: 0, name: 'pal' }) + '(fill-grad (buf O) pal)')).toBeNull();
+    core.load(`(fill-pat (buf O) ${paletteCode(stops, { buf: OWN, start: 0, name: '' })})`);
+    core.render({ ...NO_SKY, frame: 1, year: 2026, month: 10, day: 22, doy: 295, hour: 12, minute: 0, second: 0, ms: 0, weekday: 4, timeset: 1, intensity: 256 });
+    const o = core.buffer('O');
+    expect([...o.slice(0, 11)].map((p) => p >>> 0)).toEqual(stops.map((s) => { const c = parseHex(s)!; return ((c.r << 16) | (c.g << 8) | c.b) >>> 0; }));
   });
 });

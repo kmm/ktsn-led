@@ -3,6 +3,25 @@
 One version (`version.txt`) covers the firmware, the DSL, the console and HTTP API, and the IDE. Rules for bumping it
 are in CLAUDE.md ("Versioning"). Newest first; versions before 0.10.0 were not recorded here.
 
+## 0.28.0 (2026-11-14)
+- New: `(palette #FF0000 #FF8000 #FFFF00)` is a buffer of its own holding those colours (up to 255; they may be
+  computed), so a palette no longer needs a place in a G buffer: `(def fire (palette ...))` in a program or a library,
+  or `(fill-grad (buf O) (palette #000080 #00FFFF))` directly. It is filled from its colours every time it runs, so
+  writing into it (e.g. `(scale fire 0.5)`) changes only that copy until it runs again (a top-level def: the next
+  frame). Programs with their own function named `palette` keep it.
+- IDE: the Palette tab writes `(palette ...)` code (now the default; G0..G7 with `set` as before) and finds palettes
+  written that way, also inside other calls, for editing (the ▦ mark). Reference entry under Buffers.
+
+## 0.27.0 (2026-11-14)
+- New: library programs may contain `def` as well as `defn`, so a library can name palettes, colours, numbers and lists
+  for every program that uses it: put `(def fire (set (slice (buf G0) 0 3) 0 #FF0000 #FF8000 #FFFF00))` and
+  `(def pals (list fire sea))` in a library `palettes`, then `(use palettes)` and `(fill-grad (buf O) (list-pick pals
+  300))` in any program. Only the defs a program names (directly or through other library defs) are compiled in, so a
+  large library costs nothing for the rest; they run before the program's own forms, every frame. Functions (defn
+  bodies) still see only their parameters, not these names.
+- Errors: a program defining a name a used library defines, or two used libraries defining a name the program uses.
+- IDE: autocomplete offers the names used libraries define; the reference for `use` and `def` explains it.
+
 ## 0.26.0 (2026-11-13)
 - Audio: a noise gate, so a quiet room stays dark. Before, the automatic gain turned room noise up until it filled the
   bands and level within ~10 s of quiet. The gate is an RMS (a block's average loudness) in ADC counts: blocks below it

@@ -7,7 +7,9 @@ let core: Core;
 beforeAll(async () => {
   core = await loadCore();
   core.init(50);
-  core.setUseSources(new Map([['shades', '(defn dim (c:color k:decimal) (lerp #000000 c k))']]));   // for use's example
+  core.setUseSources(new Map([['shades', '(defn dim (c:color k:decimal) (lerp #000000 c k))\n'
+    + '(def fire (set (slice (buf G0) 0 3) 0 #FF0000 #FF8000 #FFFF00))\n(def sea (set (slice (buf G0) 3 6) 0 #000080 #0080FF #00FFFF))\n'
+    + '(def pals (list fire sea))']]));   // for use's example
 });
 
 describe('language reference', () => {

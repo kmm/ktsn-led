@@ -1757,6 +1757,20 @@ const native_def_t dsl_var_set = { "def", n_var_set, V_NIL, 2, 2, { A_INT, A_ANY
 const native_def_t dsl_var_get = { "variable", n_var_get, V_NIL, 1, 1, { A_INT }, 0, NULL };   /* node->ret = var type */
 static value_t n_const(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)c; (void)n; return a[0]; }
 const native_def_t dsl_const = { "value", n_const, V_NIL, 1, 1, { A_ANY }, 0, NULL };          /* node->ret = its type */
+static value_t n_palette(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    (void)a; (void)n;
+    const node_t *nd = c->node;                          /* read first: evaluating entries moves c->node */
+    const dsl_list_t *l = nd->args[0].val.u.list;
+    value_t out = nd->args[1].val;
+    for (int i = 0; i < l->n; i++) {
+        value_t v = dsl_list_item(c, l, i);
+        if (c->err) { out.type = V_NIL; return out; }
+        out.u.buf.px[i] = v.u.color;
+    }
+    return out;
+}
+const native_def_t dsl_palette = { "palette", n_palette, V_BUF, 2, 2, { A_ANY, A_ANY }, NF_LAZY, NULL };
 
 /* ---- calling user functions ---- */
 

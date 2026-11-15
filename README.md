@@ -92,6 +92,10 @@ flash partition (`progs`) next to the channel programs and the autoexec:
     lib save chase 0         store channel 0's current program as "chase"
     lib run sunset 1         put "sunset" on channel 1 now (save keeps it there)
     lib show sunset | lib rm sunset          (refused if a running program uses it and would break)
+    lib mv sunset dusk       rename it (refused like rm; programs that use it are never rewritten)
+
+`lib rm` and `lib mv` also name stored library programs that use the old name and won't compile any more (they aren't
+running, so they don't stop it).
 
 Automation: one program that runs every few seconds to schedule things: which library program each channel runs,
 and intensities (with fades). It may use G0..G7 and `env`, plus `(play ch name)`, `(stop ch)`, `(intensity [ch])` and
@@ -216,7 +220,9 @@ noise gate (rms in ADC counts, 0 = off; PATCH sets it).
 
 `GET /api/lib` lists the library (`{programs: [{name, size}], used, total}`), `GET /api/lib/<name>` gives
 `{name, src}`, `PUT /api/lib/<name>` stores the body (compiled first), `DELETE /api/lib/<name>` removes it (409 with
-the error if a running program uses it and would break).
+the error if a running program uses it and would break), `PATCH /api/lib/<name>` with `{"name": "<new>"}` renames it
+(404 no such program, 400 bad or taken name, 409 like DELETE). Both answer `{ok, note}`, the note naming stored library
+programs that used the old name.
 
 Programs sent over HTTP may be up to 3999 characters, span several lines and contain `;` comments.
 
@@ -241,9 +247,11 @@ Programs sent over HTTP may be up to 3999 characters, span several lines and con
     (fill-grad <buf> <palette> [start] [end])   gradient through palette      -> buf
     (fill-rand <buf> <color> <min> <max> [start] [end])  random brightness per pixel -> buf
     (fill-pick <buf> <color1> <color2> <p> [start] [end]) color2 with probability p  -> buf
+    (fill-noise <buf> <low> <high> <scale> [offset] [start] [end])  1D Perlin noise, low..high -> buf
     (set <buf> <index> <color>...)              up to 8 colors from index on  -> buf
     (get <buf> <index>)                         pixel color (black outside)   -> color
     (rotate <buf> <amount> [start] [end])       + right, - left; fractional = sub-pixel -> buf
+    (blur <buf> <amount> [start] [end])         0..16 passes of a 3-pixel blur, ends wrap -> buf
     (if <cond> <then> [else])                   runs one branch; its value    -> branch type
     (and a b ...) (or a b ...) (not a)          short-circuit logic           -> boolean
     (lt a b) (gt a b) (le a b) (ge a b)         compare numbers               -> boolean

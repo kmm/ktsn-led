@@ -30,8 +30,9 @@ export interface Connection {
   disconnect(): Promise<void>;
   refreshConfig(): Promise<BoardConfig | null>;
   reboot(): Promise<void>;
-  /** The board is restarting on its own (after a firmware update): drop the link, then reconnect, retrying a few times. */
-  reconnectAfterRestart(why: string, firstDelayMs?: number): Promise<void>;
+  /** The board is restarting (after a firmware update, or a reboot the IDE asked for): drop the link, then reconnect,
+   *  retrying a few times. Resolves with the new transport, or null if the board didn't come back. */
+  reconnectAfterRestart(why: string, firstDelayMs?: number): Promise<Transport | null>;
   addLog(line: string): void;
   /** Report the result of a periodic status poll: after LOST_AFTER network failures in a row the board counts as
    *  gone (powered off, out of WiFi) and the connection is dropped instead of silently retrying forever. */
@@ -122,12 +123,13 @@ export function useConnection(device: DeviceSpec | null): Connection {
     await new Promise((r) => setTimeout(r, firstDelayMs));
     for (let i = 0; i < 4; i++) {
       await connect();
-      if (tRef.current) return;
+      if (tRef.current) return tRef.current;
       setStatus('connecting');
       setMessage(`${why} (waiting for the board, try ${i + 2} of 5)`);
       await new Promise((r) => setTimeout(r, 4000));
     }
     await connect();
+    return tRef.current;
   }, [drop, connect]);
 
   const pollResult = useCallback((err: unknown | null) => {

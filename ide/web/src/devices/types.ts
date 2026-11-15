@@ -137,11 +137,14 @@ export interface Transport {
   /** Compile and run on channel `ch` (running program only; `save` persists it). Throws ApiError 400 on compile errors. */
   prog(ch: number, src: string): Promise<void>;
   cmd(line: string): Promise<{ result: number; output: string }>;
-  /** Program library: list, read, store (compiled on the board first: ApiError 400 on errors), delete. */
+  /** Program library: list, read, store (compiled on the board first: ApiError 400 on errors), delete. Delete and
+   *  rename resolve with the board's note (from 0.31.0: stored library programs that used the name), if any. */
   libList(): Promise<LibList>;
   libGet(name: string): Promise<string>;
   libPut(name: string, src: string): Promise<void>;
-  libDel(name: string): Promise<void>;
+  libDel(name: string): Promise<string | undefined>;
+  /** Rename (firmware 0.31.0+): ApiError 404 no such program, 400 bad or taken name, 409 a running program uses it. */
+  libRename(name: string, to: string): Promise<string | undefined>;
   /** Network firmware update (HTTP only): resolves with the new version; the board restarts afterwards. */
   ota?(image: Uint8Array, onProgress: (sent: number, total: number) => void): Promise<string>;
   save(): Promise<void>;

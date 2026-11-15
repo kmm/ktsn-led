@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '../devices/types';
 import {
-  boardEntries, boardFolder, entriesAsFile, fetchLibraryUrl, planUpload, readBoardLibrary, runUpload, uploadState, uploadSummary,
+  boardEntries, boardFolder, entriesAsFile, fetchLibraryUrl, planUpload, readBoardLibrary, runUpload, saveToBoardPlan, uploadState, uploadSummary,
 } from './board';
 import { applyImport, createProgram, emptyLibrary, exportLibrary, type Library, planImport } from './library';
 
@@ -113,5 +113,21 @@ describe('import from a URL', () => {
     await expect(fetchLibraryUrl('https://e.com/x', (async () => { throw new TypeError('Failed to fetch'); }) as unknown as typeof fetch))
       .rejects.toThrow(/CORS/);
     await expect(fetchLibraryUrl('https://e.com/x', respond(file, { headers: { 'content-length': String(20 * 1048576) } }))).rejects.toThrow(/at most 8 MB/);
+  });
+});
+
+describe('save a tab to the board library', () => {
+  const board = new Map<string, string | undefined>([['fire', '(fill (buf O) #FF0000)'], ['sea', undefined]]);
+  it('checks the name and the code', () => {
+    expect(saveToBoardPlan('', board, '(x)').error).toBe('give it a name');
+    expect(saveToBoardPlan('Fire', board, '(x)').error).toMatch(/starting with a letter/);
+    expect(saveToBoardPlan('a-very-long-name1', board, '(x)').error).toMatch(/up to 15/);
+    expect(saveToBoardPlan('glow', board, '  \n').error).toBe('the tab is empty');
+    expect(saveToBoardPlan('glow', board, '(x)')).toEqual({ error: null, replaces: false, same: false });
+  });
+  it('says whether it replaces a program, and whether with the same code (unread code: not the same)', () => {
+    expect(saveToBoardPlan('fire', board, '(fill (buf O) #FF0000)')).toEqual({ error: null, replaces: true, same: true });
+    expect(saveToBoardPlan('fire', board, '(fill (buf O) #00FF00)')).toEqual({ error: null, replaces: true, same: false });
+    expect(saveToBoardPlan('sea', board, '(x)')).toEqual({ error: null, replaces: true, same: false });
   });
 });

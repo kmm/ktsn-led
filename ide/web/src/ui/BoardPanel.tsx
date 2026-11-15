@@ -1,8 +1,11 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { buildRestorePatch, type ConfigFile, DEFAULT_RESTORE, exportConfig, fileName, parseConfigFile, type RestoreOptions } from '../devices/configFile';
+import {
+  afterReboot, buildRestorePatch, type ConfigFile, DEFAULT_RESTORE, exportConfig, exportPrograms, fileName, parseConfigFile, restoreChoices, type RestoreOptions,
+} from '../devices/configFile';
 import type { Connection } from '../devices/useConnection';
 import { parseAppImage, updateProblems, type AppImage } from '../devices/firmware';
-import { ApiError, type BoardStatus, type LibList } from '../devices/types';
+import { ApiError, boardIoModes, type BoardStatus, type LibList, versionAtLeast } from '../devices/types';
+import { LIB_NAME } from '../tabs/tabs';
 import { OutputsSection } from './OutputsSection';
 
 interface Props {
@@ -21,12 +24,15 @@ interface Props {
   onOpenAutomation(src: string): void;
   /** Save the board's programs into the IDE's local library (dialog; preselect e.g. "lib:wave" ticks only that one). */
   onSaveToLocal(preselect?: string): void;
+  /** A library program was renamed on the board: its open tabs follow. */
+  onLibRenamed(from: string, to: string): void;
 }
 
 const RESTORE_LABELS: [keyof RestoreOptions, string][] = [
-  ['layout', 'Channel layout (GPIOs, pixel counts; applies after reboot)'], ['programs', 'Channel programs'],
+  ['layout', 'Channel layout (GPIOs, pixel counts; if it changes, the board is saved, rebooted and reconnected, then gets the new channels\' programs)'], ['programs', 'Channel programs'],
   ['library', 'Library programs (same names are replaced)'],
   ['autoexec', 'Autoexec'], ['automation', 'Automation program and its period'], ['intensity', 'Intensity'], ['output', 'Output: gamma and dither per channel, refresh, parallel sending'], ['time', 'Time zone and NTP server'],
+  ['io', 'GPIO slots (relays, PWM, inputs, audio; the board\'s other slots are removed)'], ['audioGate', 'Audio noise gate'],
   ['hostname', 'Hostname (careful: two boards with one name collide)'], ['wifiSsid', 'WiFi SSID (keeps the board\'s current password)'],
   ['save', 'Save to the board\'s flash'],
 ];
@@ -62,13 +68,14 @@ function ChanIntensity({ ch, value, now, onCommit }: { ch: number; value: number
   );
 }
 
-export function BoardPanel({ conn, deviceName, visible, onOpenProgram, onOpenAutoexec, onFlash, onOpenLibrary, libVersion, onOpenAutomation, onSaveToLocal }: Props) {
+export function BoardPanel({ conn, deviceName, visible, onOpenProgram, onOpenAutoexec, onFlash, onOpenLibrary, libVersion, onOpenAutomation, onSaveToLocal, onLibRenamed }: Props) {
   const { transport: t, config } = conn;
   const [status, setStatus] = useState<BoardStatus | null>(null);
   const [msg, setMsg] = useState('');
   const [intensity, setIntensity] = useState(256);
   const [fade, setFade] = useState(0);
   const [restore, setRestore] = useState<{ file: ConfigFile; opts: RestoreOptions } | null>(null);
+  const [exporting, setExporting] = useState<'all' | 'programs' | null>(null);
   const [cmdLine, setCmdLine] = useState('');
   const [update, setUpdate] = useState<{ image: Uint8Array; app: AppImage; problems: string[]; sent?: number } | null>(null);
   const otaInput = useRef<HTMLInputElement>(null);
@@ -116,7 +123,7 @@ export function BoardPanel({ conn, deviceName, visible, onOpenProgram, onOpenAut
     try { await f(); setMsg(`${label}: done`); } catch (e) { setMsg(`${label} failed: ${errText(e)}`); }
   };
 
-  const download = async () => {
+  const download = async (programsOnly: boolean) => {
     const cfg = await conn.refreshConfig() ?? config;
     let library: { name: string; src: string }[] | undefined;
     try {                                                 // firmware without a library: none in the file
@@ -124,10 +131,12 @@ export function BoardPanel({ conn, deviceName, visible, onOpenProgram, onOpenAut
       library = [];
       for (const p of l.programs) library.push({ name: p.name, src: await t.libGet(p.name) });
     } catch { library = undefined; }
-    const blob = new Blob([JSON.stringify(exportConfig(cfg, deviceName, new Date(), library), null, 2)], { type: 'application/json' });
+    const now = new Date();
+    const file = programsOnly ? exportPrograms(cfg, deviceName, now, library) : exportConfig(cfg, deviceName, now, library);
+    const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = fileName(cfg);
+    a.download = fileName(cfg, now, programsOnly);
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
@@ -135,26 +144,54 @@ export function BoardPanel({ conn, deviceName, visible, onOpenProgram, onOpenAut
   const pickRestore = async (f: File | undefined) => {
     if (!f) return;
     try { setRestore({ file: parseConfigFile(await f.text()), opts: { ...DEFAULT_RESTORE } }); }
-    catch (e) { setMsg(`restore: ${errText(e)}`); }
+    catch (e) { setMsg(`import: ${errText(e)}`); }
     if (fileInput.current) fileInput.current.value = '';
   };
 
+  /** Import: removals, library, then one patch. A new channel layout needs a reboot: when saving, the board is rebooted
+   *  and reconnected here, and the programs (and their settings) for the channels it now runs go in a second patch. */
   const applyRestore = async () => {
     if (!restore) return;
-    const { removals, patch, skipped, library } = buildRestorePatch(restore.file, config, restore.opts);
+    const { file, opts } = restore;
+    const modes = boardIoModes(status?.firmware?.version, config.io ?? []);
+    const { removals, patch, skipped, library } = buildRestorePatch(file, config, opts, modes);
     setRestore(null);
-    await act('restore', async () => {
+    await act('import', async () => {
       for (const r of removals) await t.patch(r);
       for (const p of library) await t.libPut(p.name, p.src);   // first: the automation program's play names are checked
       if (library.length) await loadLib();
       const res = await t.patch(patch);
+      let notes = skipped;
+      if (res.reboot_needed && patch.save) {
+        setMsg('import: rebooting to apply the channel layout…');
+        await t.reboot();
+        const t2 = await conn.reconnectAfterRestart('rebooting to apply the channel layout…', t.kind === 'serial' ? 3000 : 8000);
+        if (!t2) throw new Error('the board didn\'t come back after the reboot: connect again and import once more for the new channels\' programs');
+        const rest = buildRestorePatch(file, await t2.config(), afterReboot(opts), modes);
+        if (rest.patch.channels) await t2.patch(rest.patch);
+        notes = [...skipped.filter((x) => !x.startsWith('program for channel')), ...rest.skipped];
+      } else if (res.reboot_needed) notes = ['save to flash and reboot to apply the channel layout, then import again for the new channels\' programs',
+        ...skipped.filter((x) => !x.startsWith('program for channel'))];
       await conn.refreshConfig();
-      const notes = [res.reboot_needed && 'reboot to apply the channel layout', ...skipped].filter(Boolean);
-      if (notes.length) setTimeout(() => setMsg(`restore: done. Note: ${notes.join('; ')}`), 0);
+      if (notes.length) setTimeout(() => setMsg(`import: done. Note: ${notes.join('; ')}`), 0);
     });
   };
 
   const fw = status?.firmware;
+  const canRename = versionAtLeast(fw?.version, '0.31.0');
+  /** After a delete or rename: the board's note (stored library programs that used the name), if any. */
+  const noted = (label: string, note: string | undefined) => { if (note) setTimeout(() => setMsg(`${label}: done. Note: ${note}`), 0); };
+  const rename = (name: string) => {
+    const to = prompt(`Rename ${name} in ${deviceName}'s library to:`, name)?.trim();
+    if (!to || to === name) return;
+    if (!LIB_NAME.test(to)) { setMsg(`rename ${name}: "${to}" isn't a usable name (a-z 0-9 - _, starting with a letter, up to 15)`); return; }
+    void act(`rename ${name} to ${to}`, async () => {
+      const note = await t.libRename(name, to);
+      await loadLib();
+      onLibRenamed(name, to);
+      noted(`rename ${name} to ${to}`, note);
+    });
+  };
   const hasW = config.channels.some((c) => /W/.test(c.wire ?? ''));
 
   const pickUpdate = async (f: File | undefined) => {
@@ -349,7 +386,8 @@ export function BoardPanel({ conn, deviceName, visible, onOpenProgram, onOpenAut
                 <td>
                   <button onClick={() => act(`open ${p.name}`, async () => onOpenLibrary(p.name, await t.libGet(p.name)))}>Open</button>{' '}
                   <button onClick={() => onSaveToLocal(`lib:${p.name}`)} title="Keep a copy in the IDE's local library">To local…</button>{' '}
-                  <button onClick={() => confirm(`Delete ${p.name} from ${deviceName}'s library?`) && act(`delete ${p.name}`, async () => { await t.libDel(p.name); await loadLib(); })}>Delete</button>
+                  {canRename && <><button onClick={() => rename(p.name)} title="Give it another name (refused while a running program uses it)">Rename…</button>{' '}</>}
+                  <button onClick={() => confirm(`Delete ${p.name} from ${deviceName}'s library?`) && act(`delete ${p.name}`, async () => { const note = await t.libDel(p.name); await loadLib(); noted(`delete ${p.name}`, note); })}>Delete</button>
                 </td>
               </tr>))}</tbody>
           </table>
@@ -398,21 +436,33 @@ export function BoardPanel({ conn, deviceName, visible, onOpenProgram, onOpenAut
       <div className="controls">
         <button onClick={() => act('save to flash', () => t.save())} title="Store programs and settings so they survive a reboot">Save to flash</button>
         <button onClick={() => confirm(`Reboot ${deviceName}?`) && act('reboot', () => conn.reboot())}>Reboot</button>
-        <button onClick={() => act('download config', download)}>Download config</button>
-        <button onClick={() => fileInput.current?.click()}>Restore config…</button>
+        <button onClick={() => setExporting(exporting ? null : 'all')} title="Download this board's programs, library and settings as a file">Export board…</button>
+        <button onClick={() => fileInput.current?.click()} title="Load an exported file into this board (you choose what)">Import to board…</button>
         <input ref={fileInput} type="file" accept=".json,application/json" hidden onChange={(e) => pickRestore(e.target.files?.[0])} />
       </div>
       {msg && <p className={/failed|error/.test(msg) ? 'bad' : 'muted'}>{msg}</p>}
 
+      {exporting && (
+        <div className="restore">
+          <p>Export <b>{deviceName}</b> to a file:</p>
+          <label className="check"><input type="radio" checked={exporting === 'all'} onChange={() => setExporting('all')} /> Everything: programs,
+            library and settings, for cloning the board (no WiFi password or token; hostname and SSID are off by default when importing)</label>
+          <label className="check"><input type="radio" checked={exporting === 'programs'} onChange={() => setExporting('programs')} /> Programs only:
+            channel programs, autoexec, automation and library</label>
+          <div className="row"><button className="primary" onClick={() => { const p = exporting === 'programs'; setExporting(null); void act('export', () => download(p)); }}>Download</button>
+            <button onClick={() => setExporting(null)}>Cancel</button></div>
+        </div>
+      )}
+
       {restore && (
         <div className="restore">
-          <p>Restore <b>{restore.file.device}</b> ({restore.file.config.channels.length} channel{restore.file.config.channels.length > 1 ? 's' : ''},
-            exported {new Date(restore.file.exported).toLocaleString()}) to <b>{deviceName}</b>:</p>
-          {RESTORE_LABELS.map(([k, label]) => (
+          <p>Import <b>{restore.file.device}</b> ({restore.file.programs_only ? 'programs only, ' : ''}{restore.file.config.channels.length} channel{restore.file.config.channels.length > 1 ? 's' : ''},
+            exported {new Date(restore.file.exported).toLocaleString()}) into <b>{deviceName}</b>:</p>
+          {RESTORE_LABELS.filter(([k]) => restoreChoices(restore.file, config).has(k)).map(([k, label]) => (
             <label key={k} className="check"><input type="checkbox" checked={restore.opts[k]}
               onChange={(e) => setRestore({ ...restore, opts: { ...restore.opts, [k]: e.target.checked } })} /> {label}</label>
           ))}
-          <div className="row"><button className="primary" onClick={applyRestore}>Restore</button><button onClick={() => setRestore(null)}>Cancel</button></div>
+          <div className="row"><button className="primary" onClick={applyRestore}>Import</button><button onClick={() => setRestore(null)}>Cancel</button></div>
         </div>
       )}
 

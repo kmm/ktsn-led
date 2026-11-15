@@ -9,7 +9,8 @@
  *   POST  /api/save          persist everything (same as the `save` command)
  *   POST  /api/reboot
  *   GET   /api/lib           the program library: {programs: [{name, size}], used, total, separate}
- *   GET   /api/lib/<name>    {name, src};  PUT (source as the body, text/plain): store;  DELETE: remove
+ *   GET   /api/lib/<name>    {name, src};  PUT (source as the body, text/plain): store;  DELETE: remove;
+ *                              PATCH {"name": "<new>"}: rename (refused while a running program uses it)
  *   POST  /api/ota           firmware image (application/octet-stream, build/ktsn-led.bin) -> written, then restart
  *                            (CONFIG_KTSN_OTA; the board keeps the new image only if it runs: see ota.c)
  *
@@ -189,6 +190,21 @@ static esp_err_t h_lib_del(httpd_req_t *r)
     return send_result(r, api_lib_del(name));
 }
 
+static esp_err_t h_lib_patch(httpd_req_t *r)
+{
+    char name[24];
+    if (!authorized(r) || !lib_name(r, name, sizeof name)) return ESP_OK;
+    size_t len;
+    char *body = read_body(r, API_BODY_MAX, &len);
+    if (!body) return ESP_OK;
+    cJSON *root = cJSON_ParseWithLength(body, len);
+    free(body);
+    const cJSON *to = cJSON_GetObjectItemCaseSensitive(root, "name");
+    api_result_t res = cJSON_IsString(to) ? api_lib_rename(name, to->valuestring) : api_error(400, "send {\"name\": \"<new name>\"} to rename");
+    cJSON_Delete(root);
+    return send_result(r, res);
+}
+
 static esp_err_t h_lib_put(httpd_req_t *r)
 {
     char name[24];
@@ -275,6 +291,7 @@ void http_api_start(void)
         { .uri = "/api/lib/*",   .method = HTTP_GET,     .handler = h_lib_get },
         { .uri = "/api/lib/*",   .method = HTTP_PUT,     .handler = h_lib_put },
         { .uri = "/api/lib/*",   .method = HTTP_DELETE,  .handler = h_lib_del },
+        { .uri = "/api/lib/*",   .method = HTTP_PATCH,   .handler = h_lib_patch },
 #if CONFIG_KTSN_OTA
         { .uri = "/api/ota",     .method = HTTP_POST,    .handler = h_ota },
 #endif

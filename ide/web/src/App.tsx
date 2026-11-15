@@ -15,7 +15,7 @@ import { ReferencePanel } from './ui/ReferencePanel';
 import { PalettePanel } from './palette/PalettePanel';
 import { createProgram, findProgram, type Library, loadLibrary, type LocalProgram, normFolder, programById, programPath, saveLibrary, saveSource } from './library/library';
 import { LibraryPanel, SaveToLibraryDialog } from './library/LibraryPanel';
-import { FromBoardDialog, UploadDialog } from './library/BoardDialogs';
+import { FromBoardDialog, SaveToBoardDialog, UploadDialog } from './library/BoardDialogs';
 import { uploadSummary } from './library/board';
 import { loadUses, localSources, usedNames } from './library/uses';
 import type { PaletteTarget } from './palette/palette';
@@ -80,6 +80,7 @@ export function App() {
   const [libProblem, setLibProblem] = useState(libLoad.problem ?? '');
   const [localMsg, setLocalMsg] = useState('');
   const [saveDialog, setSaveDialog] = useState<{ tabId: string; name: string } | null>(null);
+  const [boardSave, setBoardSave] = useState<{ tabId: string; name: string; source: string } | null>(null);   // a tab -> the board's library
   // Local library <-> connected board: upload a selection, or save the board's programs here.
   const [boardDlg, setBoardDlg] = useState<null | { kind: 'upload'; programs: LocalProgram[] } | { kind: 'from'; preselect?: string }>(null);
   const [insert, setInsert] = useState<{ text: string; seq: number } | undefined>();
@@ -468,6 +469,9 @@ export function App() {
             {(active.kind === 'program' || active.kind === 'library') &&
               <button onClick={() => setSaveDialog({ tabId: active.id, name: suggestName(active) })}
                 title="Keep this program in the IDE's local library">Save to local library…</button>}
+            {active.kind === 'program' && connected && device && (active.deviceId === null || connectedTo(active.deviceId)) &&
+              <button onClick={() => setBoardSave({ tabId: active.id, name: active.savedLib ?? suggestName(active), source: active.source })}
+                title={`Store this code as a program in ${device.name}'s library (kept over reboots); the tab keeps editing ${active.deviceId ? 'the channel' : 'the preview'}`}>Save to board library…</button>}
             </>}
           </div>
           <Editor core={core} dark={theme.dark} docKey={active.id} docText={active.source} openKeys={openKeys} recheck={useVersion}
@@ -513,7 +517,13 @@ export function App() {
               onOpenAutoexec={(src) => openFromBoard('autoexec', 0, src)} onFlash={() => setShowFlash(true)}
               onOpenLibrary={(name, src) => openFromBoard('library', 0, src, name)} libVersion={libVersion}
               onOpenAutomation={(src) => openFromBoard('automation', 0, src)}
-              onSaveToLocal={(preselect) => setBoardDlg({ kind: 'from', preselect })} />
+              onSaveToLocal={(preselect) => setBoardDlg({ kind: 'from', preselect })}
+              onLibRenamed={(from, to) => {
+                if (!device) return;
+                setTs((s) => ({ ...s, tabs: s.tabs.map((x) => (x.deviceId !== device.id ? x
+                  : x.kind === 'library' && x.lib === from ? { ...x, lib: to } : x.savedLib === from ? { ...x, savedLib: to } : x)) }));
+                setLibVersion((v) => v + 1);
+              }} />
           </div>
           <div className="tab-body" hidden={side !== 'library'}>
             <LibraryPanel core={core} lib={lib} problem={libProblem} change={changeLib} onOpen={openLocal}
@@ -546,6 +556,19 @@ export function App() {
       {saveDialog && <SaveToLibraryDialog lib={lib} initialName={saveDialog.name}
         source={ts.tabs.find((t) => t.id === saveDialog.tabId)?.source ?? ''}
         onSave={(folder, name) => saveTabToLibrary(saveDialog.tabId, folder, name)} onClose={() => setSaveDialog(null)} />}
+      {boardSave && connected && device && <SaveToBoardDialog t={conn.transport!} boardName={device.name}
+        source={boardSave.source} initialName={boardSave.name} onClose={() => setBoardSave(null)}
+        onSaved={(name) => {
+          const src = boardSave.source;
+          updateTab(boardSave.tabId, { savedLib: name });
+          setLibVersion((v) => v + 1);
+          // An open library tab of that name with nothing unsent now shows what the board holds.
+          const lt = findTab(tsRef.current.tabs, 'library', device.id, 0, name);
+          if (lt && !isUnsent(lt) && lt.source !== src) { updateTab(lt.id, { source: src, boardSource: src }); replaceText(lt.id, src); }
+          else if (lt && lt.source === src) updateTab(lt.id, { boardSource: src });
+          setBoardMsg(`stored in ${device.name}'s library as ${name} (${new Date().toLocaleTimeString()})`);
+        }}
+        onOpen={(name) => openFromBoard('library', 0, boardSave.source, name)} />}
       {boardDlg?.kind === 'upload' && connected && device && <UploadDialog core={core} t={conn.transport!} boardName={device.name}
         programs={boardDlg.programs} onClose={() => setBoardDlg(null)}
         onDone={(rs, items) => {

@@ -3,6 +3,37 @@
 One version (`version.txt`) covers the firmware, the DSL, the console and HTTP API, and the IDE. Rules for bumping it
 are in CLAUDE.md ("Versioning"). Newest first; versions before 0.10.0 were not recorded here.
 
+## 0.32.0 (2026-11-15)
+- New: `(fill-noise <buf> <low> <high> <scale> [offset] [start] [end])` fills with smooth 1D Perlin noise, blending from
+  `low` where the noise is lowest to `high` where it is highest. `scale` is the feature size in pixels; change `offset`
+  over time to make it drift (any size: the pattern repeats every 256 × scale pixels, seamlessly).
+- New: `(blur <buf> <amount> [start] [end])` softens a range, each pixel moving toward the average of itself and its
+  neighbours, with the range's ends counting as neighbours (no seam on a ring). `amount` 0..16: 1 is one full 3-pixel
+  blur, 2 two, 0.5 half of one. Blurring a G buffer a little each frame gives soft trails.
+- A program that defines its own function named `blur` or `fill-noise` now gets "is a built-in function".
+
+## 0.31.0 (2026-11-15)
+- New: rename library programs: console `lib mv <name> <new>`, HTTP `PATCH /api/lib/<name>` with `{"name": "<new>"}`,
+  serial op `lib_mv`, and Rename… in the IDE's Board panel (open tabs follow the new name). Refused while a running
+  program (a channel, the autoexec, the automation) uses the old name, like `lib rm`; programs are never rewritten. The
+  copy is stored before the old name is removed, so a power cut can't lose it.
+- `lib rm` / `lib mv` (and the API's DELETE and PATCH, as `note`) name stored library programs that use the old name
+  and won't compile any more.
+
+## 0.30.0 (2026-11-15)
+- IDE: the Board panel's **Export board…** / **Import to board…** (were Download config / Restore config) can clone a
+  board completely: files now hold the GPIO slots and the audio noise gate too (each with its own import option; slots
+  are taken whole and the board's other slots removed). When an import changes the channel layout (and saves), it
+  reboots the board, reconnects and then loads the new channels' programs itself, instead of asking for a second
+  import. New: export *Programs only* (channel programs, autoexec, automation and library, no settings); importing
+  such a file offers only those. Hostname and SSID stay off by default when importing.
+
+## 0.29.0 (2026-11-14)
+- IDE: **Save to board library…** in a program tab's bar (when connected) stores the tab's code in the board's library
+  under a name, for prototyping on a live channel: the tab keeps editing the channel and remembers the name for the next
+  save. The dialog lists the board's names, asks before replacing one, and shows the board's reason if it refuses;
+  **Open <name>** opens the stored program afterwards.
+
 ## 0.28.0 (2026-11-14)
 - New: `(palette #FF0000 #FF8000 #FFFF00)` is a buffer of its own holding those colours (up to 255; they may be
   computed), so a palette no longer needs a place in a G buffer: `(def fire (palette ...))` in a program or a library,

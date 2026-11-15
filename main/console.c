@@ -365,7 +365,7 @@ static int cmd_dither(cmd_out_t *o, int argc, char **argv)
 
 static void lib_line(const char *key, size_t len, void *ctx) { out_printf((cmd_out_t *)ctx, "  %-15s %5u chars\n", key, (unsigned)len); }
 
-/* lib | lib show <name> | lib set <name> [source] | lib save <name> <ch> | lib run <name> <ch> | lib rm <name>
+/* lib | lib show <name> | lib set <name> [source] | lib save <name> <ch> | lib run <name> <ch> | lib rm <name> | lib mv <name> <new>
  * The program library: programs stored by name (progs partition), to put on channels by hand or from automation. */
 static int cmd_lib(cmd_out_t *o, int argc, char **argv)
 {
@@ -378,7 +378,7 @@ static int cmd_lib(cmd_out_t *o, int argc, char **argv)
                    progs_separate() ? "" : " (shared with settings: flash the current layout over USB for more room)");
         return 0;
     }
-    const char *usage = "usage: lib | lib show <name> | lib set <name> [source] | lib save <name> <ch> | lib run <name> <ch> | lib rm <name>";
+    const char *usage = "usage: lib | lib show <name> | lib set <name> [source] | lib save <name> <ch> | lib run <name> <ch> | lib rm <name> | lib mv <name> <new>";
     if (argc < 3) { out_puts(o, usage); return 1; }
     const char *op = argv[1], *name = argv[2];
     const char *why = lib_check_name(name);
@@ -390,12 +390,16 @@ static int cmd_lib(cmd_out_t *o, int argc, char **argv)
         free(src);
         return 0;
     }
-    if (!strcmp(op, "rm") && argc == 3) {
-        esp_err_t r = lib_del(name, err, sizeof err);
+    if ((!strcmp(op, "rm") && argc == 3) || (!strcmp(op, "mv") && argc == 4)) {
+        bool mv = op[0] == 'm';
+        char users[120];
+        int n = lib_users(name, users, sizeof users);
+        esp_err_t r = mv ? lib_mv(name, argv[3], err, sizeof err) : lib_del(name, err, sizeof err);
         if (r == ESP_ERR_NOT_FOUND) { out_printf(o, "no library program '%s'\n", name); return 1; }
-        if (r == ESP_ERR_INVALID_STATE) { out_printf(o, "error: %s\n", err); return 1; }
-        if (r != ESP_OK) { out_printf(o, "failed: %s\n", esp_err_to_name(r)); return 1; }
-        out_puts(o, "removed");
+        if (r == ESP_ERR_INVALID_STATE || r == ESP_ERR_INVALID_ARG) { out_printf(o, "error: %s\n", err); return 1; }
+        if (r != ESP_OK) { out_printf(o, "failed: %s\n", mv ? err : esp_err_to_name(r)); return 1; }
+        if (mv) out_printf(o, "renamed to '%s'\n", argv[3]); else out_puts(o, "removed");
+        if (n) out_printf(o, "note: library program%s %s use%s '%s' and won't compile until changed\n", n > 1 ? "s" : "", users, n > 1 ? "" : "s", name);
         return 0;
     }
     if (!strcmp(op, "set")) {
@@ -1065,7 +1069,7 @@ const cmd_def_t g_cmds[] = {
     { "version",  "Firmware version, running slot (and whether it is confirmed), the other slot", cmd_version },
     { "automation", "Automation: automation | automation <source> | paste | clear | run | every <seconds>", cmd_automation },
     { "intensity", "Intensity: intensity | intensity <ch|all> <0..1> [fade seconds]  (all = global; applies at once)", cmd_intensity },
-    { "lib",      "Program library: lib | lib show|rm <name> | lib set <name> [source] | lib save|run <name> <ch>", cmd_lib },
+    { "lib",      "Program library: lib | lib show|rm <name> | lib mv <name> <new> | lib set <name> [source] | lib save|run <name> <ch>", cmd_lib },
     { "white",    "White (W): white | white <ch> max <0..100> | mode <direct|extract|boost> | point <#RRGGBB> [ratio]  (at once)", cmd_white },
     { "io",       "GPIO outputs and inputs: io | io <n|name> <on|off|0..1> | io config <n> <gpio> <binary|pwm|input|analog|audio> [freq=Hz] [invert] [name=x] [pull=up|down|none] [debounce=ms] [trigger] | io config <n> off", cmd_io },
     { "output",   "Output stage: output | output refresh <1..4> (sends per frame) | output parallel <on|off>  (at once)", cmd_output },

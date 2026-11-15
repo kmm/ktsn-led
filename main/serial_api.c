@@ -78,15 +78,18 @@ static bool handle(const char *line, size_t len)
     } else if (!strcmp(o, "cmd")) {
         const cJSON *l = cJSON_GetObjectItemCaseSensitive(req, "line");
         res = cJSON_IsString(l) ? api_cmd(l->valuestring) : api_error(400, "cmd needs \"line\" (string)");
-    } else if (!strncmp(o, "lib", 3)) {                    /* lib, lib_get {name}, lib_put {name, src}, lib_del {name} */
+    } else if (!strncmp(o, "lib", 3)) {      /* lib, lib_get {name}, lib_put {name, src}, lib_del {name}, lib_mv {name, to} */
         const cJSON *nm = cJSON_GetObjectItemCaseSensitive(req, "name"), *src = cJSON_GetObjectItemCaseSensitive(req, "src");
         const char *name = cJSON_IsString(nm) ? nm->valuestring : "";
         if (!strcmp(o, "lib")) res = api_lib_list();
         else if (!strcmp(o, "lib_get")) res = api_lib_get(name);
         else if (!strcmp(o, "lib_del")) res = api_lib_del(name);
         else if (!strcmp(o, "lib_put")) res = cJSON_IsString(src) ? api_lib_put(name, src->valuestring) : api_error(400, "lib_put needs \"name\" and \"src\"");
-        else res = api_error(404, "unknown op (lib, lib_get, lib_put, lib_del)");
-    } else res = api_error(404, "unknown op (ping status config patch prog cmd lib lib_get lib_put lib_del save reboot exit)");
+        else if (!strcmp(o, "lib_mv")) {
+            const cJSON *to = cJSON_GetObjectItemCaseSensitive(req, "to");
+            res = cJSON_IsString(to) ? api_lib_rename(name, to->valuestring) : api_error(400, "lib_mv needs \"name\" and \"to\"");
+        } else res = api_error(404, "unknown op (lib, lib_get, lib_put, lib_del, lib_mv)");
+    } else res = api_error(404, "unknown op (ping status config patch prog cmd lib lib_get lib_put lib_del lib_mv save reboot exit)");
     send_frame(id, res);
     cJSON_Delete(req);
     return stay;

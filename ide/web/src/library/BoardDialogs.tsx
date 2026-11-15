@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Core, UseSources } from '../core/ktsnLed';
 import { ApiError, type BoardChannel, type Transport } from '../devices/types';
 import {
-  boardEntries, boardFolder, type BoardEntry, entriesAsFile, planUpload, readBoardLibrary, runUpload, type UploadItem, type UploadMode,
+  boardEntries, boardFolder, type BoardEntry, entriesAsFile, planUpload, readBoardLibrary, runUpload, saveToBoardPlan, type UploadItem, type UploadMode,
   type UploadResult, uploadState, uploadSummary,
 } from './board';
 import { applyImport, type ImportMode, type Library, type LocalProgram, planImport } from './library';
@@ -203,3 +203,75 @@ export function FromBoardDialog({ t, boardName, channels, lib, preselect, change
   );
 }
 
+
+/** Store an editor tab's code in the connected board's library under a name (asks before replacing). The board compiles
+ *  it first, and checks that running programs using that name still compile; its reason is shown if it refuses. */
+export function SaveToBoardDialog({ t, boardName, source, initialName, onSaved, onOpen, onClose }: {
+  t: Transport; boardName: string; source: string; initialName: string;
+  /** Stored under that name (App refreshes the board's library and remembers the name for the tab). */
+  onSaved(name: string): void;
+  /** Open the stored program in its library tab. */
+  onOpen(name: string): void;
+  onClose(): void;
+}) {
+  const [board, setBoard] = useState<Map<string, string | undefined> | null>(null);
+  const [name, setName] = useState(initialName);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+
+  useEffect(() => {
+    let stop = false;
+    t.libList().then((l) => { if (!stop) setBoard(new Map(l.programs.map((p) => [p.name, undefined]))); })
+      .catch((e) => { if (!stop) setErr(e instanceof ApiError && e.status === 404 ? 'this board\'s firmware has no program library (update it)' : errText(e)); });
+    return () => { stop = true; };
+  }, [t]);
+  // The board's code for the name typed, when it has one: to say whether it is the same.
+  const n = name.trim();
+  useEffect(() => {
+    if (!board?.has(n) || board.get(n) !== undefined) return;
+    let stop = false;
+    t.libGet(n).then((src) => { if (!stop) setBoard((b) => (b ? new Map(b).set(n, src) : b)); }).catch(() => { /* shown as "replaces" */ });
+    return () => { stop = true; };
+  }, [t, board, n]);
+
+  const plan = board ? saveToBoardPlan(n, board, source) : null;
+  const save = async () => {
+    if (!plan || plan.error || busy) return;
+    if (plan.replaces && !plan.same && !confirm(`${boardName}'s library already has ${n}. Replace its code?`)) return;
+    setBusy(true);
+    setErr('');
+    try {
+      await t.libPut(n, source);
+      setDone(n);
+      onSaved(n);
+    } catch (e) { setErr(errText(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal form" role="dialog" aria-label="Save to board library">
+        <div className="modal-head"><h2>Save to {boardName}'s library</h2><button onClick={onClose} aria-label="Close">✕</button></div>
+        {done ? <>
+          <div className="good small">Stored as <code>{done}</code> in {boardName}'s library (kept over reboots). This tab still edits the channel.</div>
+          <div className="row"><span className="spacer" />
+            <button onClick={() => { onOpen(done); onClose(); }}>Open {done}</button>
+            <button className="primary" onClick={onClose}>Close</button></div>
+        </> : <>
+          <label>Name (a-z 0-9 - _, starting with a letter, up to 15)
+            <input autoFocus value={name} onChange={(e) => { setName(e.target.value); setErr(''); }} onKeyDown={(e) => e.key === 'Enter' && void save()} />
+          </label>
+          {board && board.size > 0 && <div className="muted small">On the board: {[...board.keys()].sort().map((k, i) => (
+            <span key={k}>{i ? ', ' : ''}<button className="link" onClick={() => { setName(k); setErr(''); }} title={`use the name ${k}`}>{k}</button></span>))}</div>}
+          {!board && !err && <div className="muted small">reading the board's library…</div>}
+          {plan && n && (plan.error ? <div className="bad small">{plan.error}</div>
+            : plan.replaces && <div className="muted small">{plan.same ? 'The board already has this code under that name.' : `Replaces the code of ${n} on the board.`}</div>)}
+          {err && <div className="bad small">{err}</div>}
+          <div className="row"><span className="spacer" /><button onClick={onClose}>Cancel</button>
+            <button className="primary" disabled={!plan || !!plan.error || busy} onClick={() => void save()}>{busy ? 'Storing…' : plan?.replaces ? 'Replace' : 'Save'}</button></div>
+        </>}
+      </div>
+    </div>
+  );
+}

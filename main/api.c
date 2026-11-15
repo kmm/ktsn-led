@@ -747,16 +747,45 @@ api_result_t api_lib_put(const char *name, const char *src)
     return why ? api_error(strstr(why, "full") ? 413 : 400, why) : ok();
 }
 
+/* {ok: true}, plus a note naming stored library programs that used the name and now won't compile. */
+static api_result_t ok_users(int n, const char *users, const char *name)
+{
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "ok", true);
+    if (n) {
+        char note[200];
+        snprintf(note, sizeof note, "library program%s %s use%s '%s' and won't compile until changed", n > 1 ? "s" : "", users, n > 1 ? "" : "s", name);
+        cJSON_AddStringToObject(j, "note", note);
+    }
+    return result(200, j);
+}
+
 api_result_t api_lib_del(const char *name)
 {
     if (lib_check_name(name)) return api_error(404, "no such library program");
-    char err[DSL_ERR_LEN];
+    char err[DSL_ERR_LEN], users[120];
     cmd_lock();
+    int n = lib_users(name, users, sizeof users);
     esp_err_t r = lib_del(name, err, sizeof err);
     cmd_unlock();
     if (r == ESP_ERR_NOT_FOUND) return api_error(404, "no such library program");
     if (r == ESP_ERR_INVALID_STATE) return api_error(409, err);
-    return r == ESP_OK ? ok() : api_error(500, esp_err_to_name(r));
+    return r == ESP_OK ? ok_users(n, users, name) : api_error(500, esp_err_to_name(r));
+}
+
+api_result_t api_lib_rename(const char *from, const char *to)
+{
+    if (lib_check_name(from)) return api_error(404, "no such library program");
+    char err[DSL_ERR_LEN], users[120];
+    cmd_lock();
+    int n = lib_users(from, users, sizeof users);
+    esp_err_t r = lib_mv(from, to, err, sizeof err);
+    cmd_unlock();
+    if (r == ESP_ERR_NOT_FOUND) return api_error(404, "no such library program");
+    if (r == ESP_ERR_INVALID_ARG) return api_error(400, err);
+    if (r == ESP_ERR_INVALID_STATE) return api_error(409, err);
+    if (strstr(err, "full")) return api_error(413, err);
+    return r == ESP_OK ? ok_users(n, users, from) : api_error(500, err);
 }
 
 typedef struct { char *buf; size_t len, cap, limit; bool truncated; } outbuf_t;

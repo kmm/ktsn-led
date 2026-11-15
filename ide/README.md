@@ -100,6 +100,11 @@ Rebuild the WebAssembly (`npm run wasm`) after changing anything in `components/
 - **From board…** (Library tab) or **Save to local library…** / **To local…** (Board panel, Library section) copies the
   board's library programs and its channel programs (as `ch0`, `ch1`, ...) into a folder, `boards/<board name>` by
   default, with the same skip / replace / keep both choice as an import.
+- **Save to board library…** in a program tab's bar (when connected) stores the tab's code in the connected board's
+  library under a name, for prototyping on a live channel: the tab keeps editing its channel. The dialog lists the
+  board's names (click one to use it) and says whether the name replaces a program there (it asks first) or already has
+  the same code; the board compiles it first and its reason is shown if it refuses. The tab remembers the name for the
+  next save; **Open <name>** afterwards opens the stored program in its library tab.
 
 ## Reference
 
@@ -123,9 +128,16 @@ Rebuild the WebAssembly (`npm run wasm`) after changing anything in `components/
 - **Board** tab: live status, channels (**Open** switches to that channel's tab, or opens one with the board's program; gamma, dither and
   (for wire formats with W) the white limit are editable and apply at once), intensity, output refresh and parallel strings,
   autoexec (**Open** likewise),
-  reboot, **Download config** (JSON, never contains the WiFi password or token) and **Restore config…** (choose what to
-  restore; programs for channels the board isn't running yet are skipped and listed), and a console for commands
-  (over serial it also shows the board's log).
+  reboot, **Export board…** and **Import to board…**, and a console for commands (over serial it also shows the board's
+  log).
+- **Export board…** downloads a JSON file (never with the WiFi password or token): *Everything* (channel layout and
+  programs, autoexec, automation, library, intensity, output settings, time zone, location, GPIO slots, audio gate,
+  hostname and SSID), for cloning a board, or *Programs only* (channel programs, autoexec, automation and library).
+  **Import to board…** reads one and lets you tick what to load (what the file or the board's firmware doesn't have
+  isn't offered; hostname and SSID are off by default, so two boards don't collide). GPIO slots are taken whole and the
+  board's other slots are removed. If the channel layout changes and *Save* is ticked, the import saves, reboots the
+  board, reconnects and then loads the new channels' programs; without *Save* it says what's left to do. The antenna
+  choice of XIAO C6 boards is never in the file (it depends on the board).
 - **Intensity** (Board panel): the global slider, one slider per channel (multiplied with the global one), and a
   fade time for changes made with them; a channel mid-fade shows where it is now. The preview applies the edited
   channel's intensity on top of its own.
@@ -133,7 +145,8 @@ Rebuild the WebAssembly (`npm run wasm`) after changing anything in `components/
   checked as the automation program, with library names checked against the connected board's library; Send sets
   it on the board; not run in the preview), Run now, and how often it runs. + → *New automation* starts one.
 - **Library** (Board panel): the board's stored programs, with Open (a library tab: Send stores it on the board, the
-  preview runs it) and Delete; + in the tab bar → *New library program…* starts one. Config files include them.
+  preview runs it), Rename… (firmware 0.31.0 and later; refused while a running program uses it, and open tabs follow
+  the new name) and Delete; + in the tab bar → *New library program…* starts one. Config files include them.
 - **Firmware** (Board panel): the running version, build date, chip and app slot. *Update over the network…* installs a
   `ktsn-led.bin` on a board with the 4 MB OTA layout (checked for chip and project first; progress, restart and
   reconnect; the board keeps the new firmware only if it runs). *Flash over USB…* (also at the bottom of Devices, and in the Board panel while not connected: for new boards

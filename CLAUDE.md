@@ -90,6 +90,8 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   on the C6 with the MAX9814); its zips not flashed yet.
   v0.28.0 released 2026-11-14 (notes cover 0.27.0..0.28.0; both flashed and confirmed by the user); its zips not
   flashed yet.
+  v0.32.0 released 2026-11-15 (notes cover 0.29.0..0.32.0; each confirmed by the user on the board); its zips not
+  flashed yet.
 
 ## Design decisions (keep these unless there is a reason to change them)
 - Pixel layout `0xWWRRGGBB`. Color order is applied only at output (`led_out.c`, per channel wire format). Global intensity is applied at output, not baked into buffers.
@@ -359,7 +361,8 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   a malloc'd buffer, cmd_unlock while listening), `audio`/`audio watch` show `rms` and "(gated)"; API config
   `audio_gate` (GET/PATCH 0..2000), status `audio.rms`; IDE Board panel row "audio": rms, gate field, Learn button
   (`audio gate learn 5` over cmd; the HTTP timeout is 8 s). Swing < AUDIO_GATE (6) still counts as silence (a dead pin).
-  Beat detection on real music: beats looked plausible in the user's watch output; not tuned further yet.
+  Beat detection on real music: **verified by the user by eye** with the MAX9814 and the gate on (2026-11-14); not
+  tuned further. If it doubles beats on some music (e.g. a kick plus a bass note), revisit then.
 - **Strings** (2026-10-31; plan agreed 2026-10-30): `V_STR` / `A_STR`, value `strref_t {p, len}`, a view (not
   NUL-terminated; `str-sub` returns part of another string without copying). Literals `"..."` (one line, at most
   `DSL_STR_MAX` 255, escapes only `\"` and `\\`; the parser counts first, then copies into the AST arena: no stack
@@ -388,8 +391,29 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   IDE Board panel; made for testing rollback.
 - **Program library** (2026-10-18): names 1..15 chars `[a-z][a-z0-9_-]*` (NVS key limit; also valid DSL names, for
   automation's `play`). `lib_put` compiles against channel 0 before storing. Console `lib`, JSON API `api_lib_*`
-  (HTTP GET/PUT/DELETE /api/lib[/<name>], serial ops lib / lib_get / lib_put / lib_del), IDE tab kind `library`
+  (HTTP GET/PUT/DELETE/PATCH /api/lib[/<name>], serial ops lib / lib_get / lib_put / lib_del / lib_mv), IDE tab kind `library`
   (Send = store on the board), Board panel Library section, config files `library` (restore option).
+- **Library rename** (0.31.0, 2026-11-15): `lib_mv` (progs.c) stores under the new name first, then erases the old one
+  (a power cut leaves both; an erase failure says so: "stored as 'x' but could not remove 'y'"). Refused like `lib_del`:
+  `lib_recheck` with the old name hidden (a running channel, the autoexec or the automation would break, incl. its
+  `play` names); never rewrites references (agreed with the user). `lib_users(name)`: stored library programs that
+  compile now and not with the name hidden (two compiles each, only those mentioning "use"; follows nested uses,
+  ignores comments), reported as a note by `lib rm` / `lib mv` and the API (`{ok, note}` on DELETE and PATCH). Console
+  `lib mv <old> <new>`, HTTP `PATCH /api/lib/<old> {"name"}` (400 bad / taken, 404, 409, 413 full), serial op
+  `lib_mv {name, to}`. IDE: `Transport.libRename`, libDel returns the note; Board panel Rename… (firmware 0.31.0+, via
+  prompt); `onLibRenamed` moves library tabs and `savedLib` names to the new name.
+- **Board files** (devices/configFile.ts; Export board… / Import to board… in the Board panel, 0.30.0, 2026-11-15; were
+  Download config / Restore config): format `ktsn-led-config`. Full exports stay version 1 (new fields optional: `io`
+  slots as the config reports them, `audio_gate`), so older IDEs read them; programs-only exports are version 2
+  (`programs_only: true`, channels `{prog}` only). `restoreChoices(file, board)` decides which options are offered and
+  `buildRestorePatch` masks the rest. io: the file's slots whole, the board's other slots `null`; slots beyond `io_max`
+  or with modes the firmware lacks (`boardIoModes`) are skipped and listed. Antenna never in files. A layout change
+  with save: patch, `t.reboot()`, `conn.reconnectAfterRestart` (now resolves with the new transport, or null), then a
+  second patch from `afterReboot(opts)` (programs, intensity, output; saved) against the fresh config.
+  **Save to board library…** (0.29.0, 2026-11-14): on program tabs (board-targeted on the connected board, or
+  preview-only) when connected; `SaveToBoardDialog` (library/BoardDialogs.tsx) + `saveToBoardPlan` (board.ts: name
+  check, replaces / same code). The tab stays a channel tab (prototyping on a live channel) and remembers the name in
+  `EditorTab.savedLib`; an open library tab of that name with nothing unsent is updated to the stored code.
 - **Multi-line entry** (2026-10-17): `prog <ch>` alone and `autoexec paste` read lines until one that is only `.`
   (`read_source` in console.c), up to SOURCE_MAX, comments and indentation kept, compiled as a whole. Interactive
   transports give `cmd_out_t.read_line` (serial: `stdin_read_line` in cmd.c, polling stdin with its own echo while the
@@ -497,6 +521,17 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
 - **Names as arguments** (like `env` fields) are resolved at compile time by the native's `bind` hook, so a typo is a
   compile error pointing at the name, never a run-time lookup or fault.
 - **Values used as indices** must not go negative by accident (negatives index from the end); e.g. `env frame` is masked.
+- **Noise and blur** (0.32.0, 2026-11-15, natives.c): `(fill-noise buf low high scale [offset] [start] [end])` is 1D
+  gradient (Perlin) noise in fixed point: lattice x = (i - start + offset) / scale (Q16.16 in int64; offset A_NUMERIC,
+  so a V_INT of any size works, reduced mod the period 256 x scale first); gradient per cell from an integer hash
+  (cells & 255: period 256), random sign, magnitude 0.5..1; quintic fade. The value (within +-0.5) maps 1:1 to 0..1,
+  so low / high are the noise's exact extremes, never clipped (doubling it clipped ~20% of pixels: tried first, host
+  probe); lattice points are exactly the midpoint. Same pattern on every board, no seed. `(blur buf amount [start]
+  [end])`: amount A_NUM clamped 0..16; whole part = full passes, fraction a partial pass; a pass moves each pixel
+  k/256 toward the 3-pixel average (per byte round((a+b+c)/3) via *21846>>16) with the range's ends as neighbours
+  (a ring), in place keeping only the originals still needed (no scratch). Full pass = box [1/3 1/3 1/3] (a [1/2 0 1/2]
+  kernel would keep a checkerboard alive). Both names were free in tests and examples; a program's own `defn` of
+  either name is now an error, as for any native. The error test that used `blur` as its unknown name now uses `smear`.
 - **Lists of colors** (palettes) are passed as a buffer view, not variadic args: `(fill-grad (buf O) (slice (buf G0) 0 3))`.
   **`(palette c ...)`** (0.28.0, 2026-11-14, step 2 of named palettes): a compiler form (`compile_palette`, like `list`:
   yields to a user `defn palette`; 1..DSL_LIST_MAX colours, each compiled as A_COLOR, may be computed) -> a node of the
@@ -729,7 +764,29 @@ Console: `version` (what runs, slot, unconfirmed update?, other slot), `prog <ch
   nested ones, compiled and rendered on the real core, reference example), checked by Claude in the dev-server
   preview (renders; ▦ on a def'd and an inline palette; editing the inline one and applying keeps it inline), builds
   for every variant. **Verified by the user on the board** (2026-11-14).
-Host tests: 6189 checks, 0 failures (macOS clang and gcc). **Builds cleanly with ESP-IDF v6.1 for esp32, flashed and running; RGB color order confirmed on the WS2811 string.**
+- Save to board library (0.29.0, 2026-11-14): IDE tests (`saveToBoardPlan`), checked by Claude in the dev-server preview
+  against a mock board (button on a connected channel tab; board names listed; stored, then Open gives an unchanged
+  library tab; the name is remembered with "already has this code"; replacing is announced; a board refusal is shown
+  and the dialog stays open). **Verified by the user on the board** (2026-11-15).
+- Board export / import (0.30.0, 2026-11-15): IDE tests (io and audio gate round trip and restore, slots beyond io_max and
+  missing modes skipped, programs-only export and its choices, after-reboot options, full exports stay version 1),
+  checked by Claude in the dev-server preview against two stateful mock boards (export everything and programs only;
+  import into a 1-channel board: layout patch, reboot, reconnect, then the new channels' programs; io slots replaced,
+  gate, library, automation, hostname kept; a programs-only file offers only its options). **Verified by the user on
+  the board** (2026-11-15).
+- Library rename (0.31.0, 2026-11-15): IDE tests (rename over serial against the simulated board: note, 400, 404; HTTP
+  PATCH body), checked by Claude in the dev-server preview against a mock board (rename with a note about a library
+  program that used it; a rename the automation needs refused with its reason; a bad and a taken name refused; the open
+  library tab and a channel tab's saved name follow), builds for every variant. Firmware `lib_mv` / `lib_users` /
+  `lib mv` / PATCH not host-testable (NVS). **Verified by the user on the board** (2026-11-15).
+- Noise and blur (0.32.0, 2026-11-15): host-tested (`t_fill_noise`: grey between black and white, lattice points at 128,
+  spread 0..255 never clipped, smooth steps, whole-pixel offsets either way, offsets of a period and huge ones, a 0.5
+  offset equals scale 16 offset 1 at even pixels, ranges count from their start, colour blend, repeatable, scale 0 / -3
+  fault; `t_blur`: one, two and half passes exactly, 0 and negative do nothing, a flat RGBW colour stays, 16 passes
+  spread symmetric round the ring and keep the total, above 16 clamps, a range is its own ring, strided slices, one
+  pixel no-op), IDE tests (reference examples on the real core), checked by Claude in the dev-server preview (both
+  reference examples run with no faults). **Verified by the user on the board** (2026-11-15).
+Host tests: 6230 checks, 0 failures (macOS clang and gcc). **Builds cleanly with ESP-IDF v6.1 for esp32, flashed and running; RGB color order confirmed on the WS2811 string.**
 - Toolchain: `source ~/.espressif/tools/activate_idf_v6.1.sh` (EIM install).
 - `led_strip` is pinned to `^3.0.0` (3.x uses `color_component_format`; 2.x used `led_pixel_format`). Color order is the per-channel wire format (it was `LED_COLOR_FORMAT` in `config.h` until 2026-10-18).
 - `main` requires `esp_driver_rmt` (not the legacy `driver` component).
@@ -904,11 +961,19 @@ Still unverified on hardware:
 2. `led_model` is `LED_MODEL_WS2812` (800 kHz). led_strip 3.x also has `LED_MODEL_WS2811`; try it if the string misbehaves.
 
 ## Next steps (planned)
+- Library management (agreed with the user 2026-11-14, three phases, one bump each):
+  - Phase 1, 0.29.0: IDE "Save to board library…" on channel tabs (done, see "Program library").
+  - Phase 2, 0.30.0: Export board… / Import to board… (done, see "Board files").
+  - Phase 3, 0.31.0 (done, see "Library rename"): rename library programs (`lib mv <old> <new>`, `PATCH /api/lib/<old> {"name"}`, serial op,
+    Board panel Rename; open library tabs follow). Stores the copy first, then erases the old one (a power cut leaves
+    two copies, never none); fails if the new name exists or there is no room. **Refused while a running program
+    uses the old name** (agreed: no rewriting of references), like `lib rm`; also warn (mv and rm) about stored
+    library programs that `use` it but aren't running.
 - Named palettes (agreed with the user 2026-11-14, two steps): step 1 library `def`s (done, 0.27.0); step 2
   `(palette ...)` (done, 0.28.0; refilled every run instead of refusing writes, see "Lists of colors").
 - Time comparisons, inputs, audio (plan agreed with the user 2026-11-12; pushed with CI on the user's word 2026-11-12,
   with audio untested on a microphone; the user's MAX9814 arrived 2026-11-13: noise gate in 0.26.0, beat detection
-  on real music still to judge). One handover + bump per phase:
+  on real music verified 2026-11-14). One handover + bump per phase:
   - Phase 1, 0.19.0 (done 2026-11-12, see Status): `time-gt/ge/lt/le/eq <t>`, `(time-in <from> <to>)` (wraps midnight, end exclusive);
     `date-gt/ge/lt/le/eq <d>`, `(date-in <from> <to>)` (wraps the year end, end inclusive). Times: a `"HH:MM[:SS]"`
     literal (checked at compile time) or a number = minutes after midnight (decimal for seconds; negative, e.g.

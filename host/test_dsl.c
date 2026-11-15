@@ -977,7 +977,7 @@ static void t_errors(channel_t *ch)
 {
     char e[DSL_ERR_LEN];
     struct { const char *src, *want; } cases[] = {
-        { "(blur (buf O))",              "unknown function 'blur'" },
+        { "(smear (buf O))",             "unknown function 'smear'" },
         { "(fill (buf O))",              "2 to 4 arguments, got 1" },
         { "(scale O 0.5)",                "did you mean (buf O)" },
         { "(scale (buf O) #FF0000)",      "expected number, got color" },
@@ -2164,6 +2164,99 @@ static void t_palette(channel_t *ch)
           && ch->perf.faults > f0);                                              /* an entry that faults: the run faults */
 }
 
+/* Byte `sh` (16 = red) of every pixel of a buffer. */
+static int px_byte(pixel_t p, int sh) { return (int)((p >> sh) & 255u); }
+
+static void t_fill_noise(void)
+{
+    channel_t c, *ch = &c;
+    char e[DSL_ERR_LEN];
+    if (channel_init(ch, 300, 512, &env, &globals)) { puts("alloc failed"); g_fail++; return; }
+    static pixel_t base[300];
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 8)", e) == 0);
+    memcpy(base, ch->buf[BUF_O], sizeof base);
+    int lo = 255, hi = 0, step = 0, gray = 1, ends = 0;
+    for (int i = 0; i < 300; i++) {
+        int r = px_byte(base[i], 16);
+        if (r < lo) lo = r;
+        if (r > hi) hi = r;
+        if (r == 0 || r == 255) ends++;
+        if (i && abs(r - px_byte(base[i - 1], 16)) > step) step = abs(r - px_byte(base[i - 1], 16));
+        if (px_byte(base[i], 8) != r || px_byte(base[i], 0) != r || px_byte(base[i], 24) != 0) gray = 0;
+        if (i % 8 == 0 && r != 128) gray = 0;                              /* lattice points sit in the middle */
+    }
+    CHECK(gray);
+    CHECK(lo < 50 && hi > 200);                                             /* spreads over most of the range */
+    CHECK(ends == 0);                                                       /* never flattened against the ends */
+    CHECK(step < 80);                                                       /* smooth at 8 px per cell */
+    /* offsets move the pattern: by whole pixels exactly, either way, and of any size (period 256 x scale) */
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 8 5)", e) == 0 && !memcmp(ch->buf[BUF_O], base + 5, 295 * sizeof(pixel_t)));
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 8 -5)", e) == 0 && !memcmp(ch->buf[BUF_O] + 5, base, 295 * sizeof(pixel_t)));
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 8 2048)", e) == 0 && !memcmp(ch->buf[BUF_O], base, sizeof base));
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 8 (* 2048 1000000))", e) == 0 && !memcmp(ch->buf[BUF_O], base, sizeof base));
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 8 5.0)", e) == 0 && !memcmp(ch->buf[BUF_O], base + 5, 295 * sizeof(pixel_t)));
+    /* a fraction samples between pixels: offset 0.5 at scale 8 is pixel 2i at scale 16 offset 1, (2i + 1) / 16 */
+    static pixel_t half[300];
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 8 0.5)", e) == 0);
+    memcpy(half, ch->buf[BUF_O], sizeof half);
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 16 1)", e) == 0);
+    int between = 1;
+    for (int i = 0; i < 150; i++) if (half[i] != ch->buf[BUF_O][2 * i]) between = 0;
+    CHECK(between && memcmp(half, base, sizeof half));
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 16)", e) == 0 && px_byte(ch->buf[BUF_O][16], 16) == 128);   /* bigger cells */
+    /* a range: position counts from its start, the rest untouched; colours blend low -> high */
+    CHECK(run(ch, "(fill (buf O) #0000FF) (fill-noise (buf O) #000000 #FFFFFF 8 _ 100 120)", e) == 0);
+    CHECK(ch->buf[BUF_O][99] == 0x0000FF && ch->buf[BUF_O][120] == 0x0000FF && !memcmp(ch->buf[BUF_O] + 100, base, 20 * sizeof(pixel_t)));
+    CHECK(run(ch, "(fill-noise (buf O) #200000 #2000FF 8)", e) == 0);
+    int blend = 1;
+    for (int i = 0; i < 300; i++) if (ch->buf[BUF_O][i] != (0x200000u | (uint32_t)px_byte(base[i], 16))) blend = 0;
+    CHECK(blend);
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 8)", e) == 0 && !memcmp(ch->buf[BUF_O], base, sizeof base));   /* the same every time */
+    uint32_t f0 = ch->perf.faults;
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF 0)", e) == 0 && ch->perf.faults == f0 + 1 && strstr(ch->perf.last_err, "scale must be above 0"));
+    CHECK(run(ch, "(fill-noise (buf O) #000000 #FFFFFF -3)", e) == 0 && ch->perf.faults == f0 + 2);
+    expect_err(ch, "(fill-noise (buf O) #000000 #FFFFFF)", "takes 4 to 7 arguments");
+    channel_free(ch);
+}
+
+static void t_blur(channel_t *ch)
+{
+    char e[DSL_ERR_LEN];
+    pixel_t *o = ch->buf[BUF_O];
+    /* one full pass: a 3-pixel box, the ends neighbours of each other */
+    CHECK(run(ch, "(fill (buf O) #000000) (set (buf O) 0 #FF0000) (blur (buf O) 1)", e) == 0);
+    CHECK(o[0] == 0x550000 && o[1] == 0x550000 && o[9] == 0x550000 && o[2] == 0 && o[8] == 0);
+    CHECK(run(ch, "(fill (buf O) #000000) (set (buf O) 0 #FF0000) (blur (buf O) 2)", e) == 0);   /* two passes */
+    CHECK(px_byte(o[0], 16) == 85 && px_byte(o[1], 16) == 57 && o[1] == o[9] && px_byte(o[2], 16) == 28 && o[2] == o[8] && o[3] == 0);
+    CHECK(run(ch, "(fill (buf O) #000000) (set (buf O) 0 #FF0000) (blur (buf O) 0.5)", e) == 0);  /* halfway to a pass */
+    CHECK(px_byte(o[0], 16) == 170 && px_byte(o[1], 16) == 43 && o[1] == o[9]);
+    CHECK(run(ch, "(fill (buf O) #000000) (set (buf O) 0 #FF0000) (blur (buf O) 0)", e) == 0 && o[0] == 0xFF0000 && o[1] == 0);
+    CHECK(run(ch, "(fill (buf O) #000000) (set (buf O) 0 #FF0000) (blur (buf O) -1)", e) == 0 && o[0] == 0xFF0000);
+    /* a flat colour stays put, all four bytes; long blurs even out and keep the total roughly */
+    CHECK(run(ch, "(fill (buf O) #1234567F) (blur (buf O) 16)", e) == 0);
+    int flat = 1;
+    for (int i = 0; i < 10; i++) if (o[i] != 0x7F123456u) flat = 0;
+    CHECK(flat);
+    CHECK(run(ch, "(fill (buf O) #000000) (set (buf O) 0 #FF0000) (blur (buf O) 16)", e) == 0);
+    pixel_t sixteen[10];
+    memcpy(sixteen, o, sizeof sixteen);
+    int sum = 0, shape = 1;
+    for (int i = 0; i < 10; i++) {
+        sum += px_byte(o[i], 16);
+        if (i && i < 5 && px_byte(o[i], 16) > px_byte(o[i - 1], 16)) shape = 0;    /* falls away from the spike */
+        if (i && o[i] != o[10 - i]) shape = 0;                                     /* the same both ways round */
+    }
+    CHECK(shape && px_byte(o[5], 16) > 10 && sum > 240 && sum < 270);              /* spread round the ring, about kept */
+    CHECK(run(ch, "(fill (buf O) #000000) (set (buf O) 0 #FF0000) (blur (buf O) 100)", e) == 0 && !memcmp(o, sixteen, sizeof sixteen));   /* clamped to 16 */
+    /* a range is its own ring: its ends are neighbours, outside untouched */
+    CHECK(run(ch, "(fill (buf O) #000000) (set (buf O) 2 #FF0000) (blur (buf O) 1 2 6)", e) == 0);
+    CHECK(o[1] == 0 && o[2] == 0x550000 && o[3] == 0x550000 && o[5] == 0x550000 && o[4] == 0 && o[6] == 0);
+    CHECK(run(ch, "(fill (buf O) #000000) (set (buf O) 0 #FF0000) (blur (slice (buf O) 0 10 2) 1)", e) == 0);   /* strided view */
+    CHECK(o[0] == 0x550000 && o[2] == 0x550000 && o[8] == 0x550000 && o[1] == 0 && o[4] == 0);
+    CHECK(run(ch, "(fill (buf O) #000000) (set (buf O) 3 #FF0000) (blur (buf O) 1 3 4)", e) == 0 && o[3] == 0xFF0000);   /* 1 pixel: no-op */
+    expect_err(ch, "(blur (buf O))", "takes 2 to 4 arguments");
+}
+
 static void t_lists(channel_t *ch)
 {
     char e[DSL_ERR_LEN];
@@ -2976,7 +3069,7 @@ int main(void)
 {
     CHECK(globals_init(&globals, 10) == 0);
     with_channel(t_fill); with_channel(t_scale_and_persistence); with_channel(t_invert); with_channel(t_nesting_globals);
-    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); with_channel(t_lists); with_channel(t_palette); with_channel(t_play_pick); t_astro(); t_audio(); with_channel(t_errors); with_channel(t_swap_atomic);
+    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); with_channel(t_lists); with_channel(t_palette); t_fill_noise(); with_channel(t_blur); with_channel(t_play_pick); t_astro(); t_audio(); with_channel(t_errors); with_channel(t_swap_atomic);
     t_arena(); t_ws_parallel(); t_gamma(); t_dither(); t_wire(); t_wire_white(); t_wire_wmode(); t_fader(); t_intensity16(); t_px_scale_exhaustive(); t_blend_math(); t_stats();
     for (int i = 0; i < DSL_NUM_GLOBALS; i++) free(globals.buf[i]);
     printf("%d checks, %d failed\n", g_checks, g_fail);

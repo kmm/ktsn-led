@@ -34,5 +34,12 @@ const char *lib_put(const char *name, const char *src, char *err, size_t errlen)
 /* Remove a library program, with the same check (cmd_lock held): ESP_ERR_NOT_FOUND if there is none,
  * ESP_ERR_INVALID_STATE if a running program uses it (err says which). */
 esp_err_t   lib_del(const char *name, char *err, size_t errlen);
+/* Rename a library program (cmd_lock held): stored under `to` first, then `from` erased. ESP_ERR_NOT_FOUND if there is
+ * no `from`, ESP_ERR_INVALID_ARG if `to` is not a usable name or is taken, ESP_ERR_INVALID_STATE if a running program
+ * uses `from` (references are never rewritten); err says why (also for storage errors). */
+esp_err_t   lib_mv(const char *from, const char *to, char *err, size_t errlen);
+/* Stored library programs (other than `name`) that use `name` and would stop compiling without it, running or not:
+ * how many, names in out (comma separated, cut short if long). Compiles them (cmd_lock held). */
+int         lib_users(const char *name, char *out, size_t cap);
 /* Bumped by every library change (automation re-checks programs it put on channels). */
 extern volatile uint32_t g_lib_gen;

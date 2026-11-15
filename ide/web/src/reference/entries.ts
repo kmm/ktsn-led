@@ -187,6 +187,23 @@ export const ENTRIES: Entry[] = [
     details: 'Chosen again every frame, so a small p with a bright color2 gives sparkles.',
     example: '(fill-pick (buf O) #000010 #FFFFFF 0.03)    ; sparkles on deep blue',
   },
+  {
+    name: 'fill-noise', category: 'Filling', summary: 'Fill with smooth 1D Perlin noise, blending from one color at its lowest to another at its highest.',
+    args: [
+      { name: 'buf', type: 'buffer', desc: 'buffer or slice' },
+      { name: 'low', type: 'color', desc: 'color where the noise is at its minimum' },
+      { name: 'high', type: 'color', desc: 'color where the noise is at its maximum' },
+      { name: 'scale', type: 'number', desc: 'pixels per noise cell: the size of a feature (above 0)' },
+      { name: 'offset', type: 'number', desc: 'pixels to move the pattern by; change it over time to animate', optional: true, def: '0' },
+      ...range,
+    ],
+    returns: 'buf',
+    details: 'Gradient noise: it rises and falls smoothly, passing the midpoint color once per cell, and the same scale and ' +
+      'offset always give the same pattern on every board. Most pixels sit between the two colors; the colors themselves are ' +
+      'the noise\'s extremes. Positions count from the start of the range. The pattern repeats every 256 × scale pixels, so ' +
+      'offsets of any size wrap seamlessly; fractional offsets move it smoothly. Use _ for the offset to give a range without one.',
+    example: '(fill-noise (buf O) #000814 #00C0FF 12 (* (mod (env frame) 30720) 0.1))    ; drifting water',
+  },
 
   /* ---------------- Pixels ---------------- */
   {
@@ -288,6 +305,16 @@ export const ENTRIES: Entry[] = [
       'blending neighbours, which softens the pattern: rotating the same buffer by a fraction every frame blurs it. For ' +
       'smooth sub-pixel motion, rotate a fresh copy each frame by an amount that grows with time.',
     example: '(fill-grad (buf X) (set (slice (buf G0) 0 3) 0 #FF0000 #00FF00 #0000FF))\n(copy (buf O) (buf X))\n(rotate (buf O) (* (mod (env frame) 200) 0.25))',
+  },
+  {
+    name: 'blur', category: 'Motion', summary: 'Soften a range: each pixel moves toward the average of itself and its neighbours; the ends wrap round.',
+    args: [{ name: 'buf', type: 'buffer', desc: 'buffer or slice' }, { name: 'amount', type: 'number', desc: 'blur factor 0..16: 1 is one full 3-pixel blur, 2 two of them, 0.5 half of one' }, ...range],
+    returns: 'buf',
+    details: 'The first and last pixels of the range count as neighbours, so a ring of LEDs blurs with no seam (and a range ' +
+      'blurs as its own ring, leaving the rest alone). The whole part of amount is that many full passes, the fraction a ' +
+      'partial one; above 16 counts as 16. A flat color stays as it is. Blurring a G buffer a little every frame makes ' +
+      'whatever is drawn into it spread out and leave soft trails.',
+    example: '(fill-pick (buf X) #000000 #FFFFFF 0.02)\n(lighten (buf G0) (buf X))\n(blur (buf G0) 0.4)\n(scale (buf G0) 0.95)\n(copy (buf O) (buf G0))',
   },
 
   /* ---------------- Logic ---------------- */

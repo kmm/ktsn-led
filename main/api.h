@@ -28,3 +28,5 @@ api_result_t api_lib_list(void);
 api_result_t api_lib_get(const char *name);
 api_result_t api_lib_put(const char *name, const char *src);
 api_result_t api_lib_del(const char *name);
+/* Rename: 404 no such program, 400 bad / taken new name, 409 a running program uses it, 413 storage full. */
+api_result_t api_lib_rename(const char *from, const char *to);

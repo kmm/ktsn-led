@@ -16,6 +16,7 @@ export interface EditorTab {
   name?: string;                  // preview-only tabs: "untitled 2"
   lib?: string;                   // library tabs: the program's name in the board's library
   localId?: string;               // local tabs: the program's id in the local library
+  savedLib?: string;              // channel tabs: the name last used for "Save to board library"
 }
 
 export interface TabsState { tabs: EditorTab[]; activeId: string }

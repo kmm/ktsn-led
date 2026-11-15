@@ -183,6 +183,79 @@ esp_err_t lib_del(const char *name, char *err, size_t errlen)
     return r;
 }
 
+/* Rename: store the source under `to`, then erase `from` (a power cut in between leaves both, never neither). The same
+ * check as lib_del for `from` disappearing (cmd_lock held). ESP_ERR_NOT_FOUND: no `from`; ESP_ERR_INVALID_ARG: bad or
+ * taken `to` (err says); ESP_ERR_INVALID_STATE: a running program uses `from` (err says which); else a storage error
+ * (err says). */
+esp_err_t lib_mv(const char *from, const char *to, char *err, size_t errlen)
+{
+    char *src = progs_get(PROGS_NS_LIB, from);
+    if (!src) return ESP_ERR_NOT_FOUND;
+    const char *why = lib_check_name(to);
+    char *there = why ? NULL : progs_get(PROGS_NS_LIB, to);
+    if (!why && there) why = !strcmp(from, to) ? "that is its name already" : "a library program of that name exists (lib rm it first)";
+    free(there);
+    if (why) { free(src); snprintf(err, errlen, "%s", why); return ESP_ERR_INVALID_ARG; }
+    program_t *progs[CHANNELS_MAX];
+    s_over_name = from; s_over_src = NULL;
+    why = lib_recheck(progs, err, errlen);
+    s_over_name = NULL;
+    if (why) { free(src); return ESP_ERR_INVALID_STATE; }
+    esp_err_t r = progs_set(PROGS_NS_LIB, to, src);
+    free(src);
+    if (r != ESP_OK) {
+        for (int i = 0; i < CHANNELS_MAX; i++) program_free(progs[i]);
+        snprintf(err, errlen, "could not store it: %s", r == ESP_ERR_NVS_NOT_ENOUGH_SPACE ? "program storage is full" : esp_err_to_name(r));
+        return r;
+    }
+    r = progs_set(PROGS_NS_LIB, from, NULL);
+    if (r != ESP_OK) {               /* both names now hold it: say so (lib rm the old one to finish) */
+        for (int i = 0; i < CHANNELS_MAX; i++) program_free(progs[i]);
+        g_lib_gen++;
+        snprintf(err, errlen, "stored as '%s' but could not remove '%s' (%s): lib rm it", to, from, esp_err_to_name(r));
+        return r;
+    }
+    g_lib_gen++;
+    lib_publish(progs);
+    return ESP_OK;
+}
+
+typedef struct { const char *name; char *out; size_t cap; int n; } users_t;
+
+/* A stored library program uses `name` if it compiles now and doesn't without it (follows nested uses too). */
+static void users_add(const char *key, size_t len, void *ctx)
+{
+    users_t *u = ctx;
+    (void)len;
+    if (!strcmp(key, u->name)) return;
+    char *src = progs_get(PROGS_NS_LIB, key);
+    if (!src) return;
+    char e[DSL_ERR_LEN];
+    program_t *p = strstr(src, "use") ? dsl_compile(&g_channels[0], src, e, sizeof e) : NULL;
+    if (p) {
+        program_free(p);
+        s_over_name = u->name; s_over_src = NULL;
+        p = dsl_compile(&g_channels[0], src, e, sizeof e);
+        s_over_name = NULL;
+        if (p) program_free(p);
+        else {
+            size_t l = strlen(u->out);
+            if (l + strlen(key) + 3 < u->cap) snprintf(u->out + l, u->cap - l, "%s%s", u->n ? ", " : "", key);
+            u->n++;
+        }
+    }
+    free(src);
+}
+
+int lib_users(const char *name, char *out, size_t cap)
+{
+    users_t u = { name, out, cap, 0 };
+    if (cap) out[0] = 0;
+    if (g_nchannels < 1) return 0;
+    progs_list(PROGS_NS_LIB, users_add, &u);
+    return u.n;
+}
+
 const char *lib_check_name(const char *name)
 {
     size_t n = strlen(name);

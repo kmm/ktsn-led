@@ -4,7 +4,20 @@
 
 import { ApiError } from '../devices/types';
 import { FOLDER_PART_MAX, type LocalProgram, normFolder, parseLibraryFile, programPath, uniqueName } from './library';
+import { LIB_NAME } from '../tabs/tabs';
 import { usesFirst } from './uses';
+
+/* ---- one editor tab -> board library ---- */
+
+/** Saving a tab's code into the board's library under `name`: why not (null if fine), and whether it replaces a
+ *  program already there (`same`: with the same code, so nothing changes). */
+export function saveToBoardPlan(name: string, board: Map<string, string | undefined>, source: string):
+  { error: string | null; replaces: boolean; same: boolean } {
+  const error = !name ? 'give it a name' : !LIB_NAME.test(name) ? 'a-z 0-9 - _, starting with a letter, up to 15 characters'
+    : !source.trim() ? 'the tab is empty' : null;
+  const replaces = board.has(name);
+  return { error, replaces, same: replaces && board.get(name) === source };
+}
 
 /* ---- upload: local library -> board library ---- */
 

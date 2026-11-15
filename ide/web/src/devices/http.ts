@@ -51,7 +51,8 @@ export class HttpTransport implements Transport {
 
   libList() { return this.json<LibList>('GET', '/api/lib'); }
   async libGet(name: string) { return (await this.json<{ src: string }>('GET', `/api/lib/${encodeURIComponent(name)}`)).src; }
-  async libDel(name: string) { await this.json('DELETE', `/api/lib/${encodeURIComponent(name)}`); }
+  async libDel(name: string) { return (await this.json<{ note?: string }>('DELETE', `/api/lib/${encodeURIComponent(name)}`)).note; }
+  async libRename(name: string, to: string) { return (await this.json<{ note?: string }>('PATCH', `/api/lib/${encodeURIComponent(name)}`, { name: to })).note; }
   async libPut(name: string, src: string) {
     const r = await this.request('PUT', `/api/lib/${encodeURIComponent(name)}`, src, 'text/plain');
     if (!r.ok) throw apiError(r.status, await r.json().catch(() => ({})));

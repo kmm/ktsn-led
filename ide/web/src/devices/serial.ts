@@ -148,7 +148,8 @@ export class SerialTransport implements Transport {
   libList() { return this.request<LibList>('lib'); }
   async libGet(name: string) { return (await this.request<{ src: string }>('lib_get', { name })).src; }
   async libPut(name: string, src: string) { await this.request('lib_put', { name, src }); }
-  async libDel(name: string) { await this.request('lib_del', { name }); }
+  async libDel(name: string) { return (await this.request<{ note?: string }>('lib_del', { name })).note; }
+  async libRename(name: string, to: string) { return (await this.request<{ note?: string }>('lib_mv', { name, to })).note; }
   async reboot() { await this.request('reboot'); }
 
   /** Commands that fail come back as status 400 but still carry their output: return it, like HTTP does. */

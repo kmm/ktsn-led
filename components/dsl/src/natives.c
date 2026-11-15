@@ -378,6 +378,101 @@ static value_t n_rotate(exec_ctx_t *c, const value_t *a, uint8_t n)
     return a[0];
 }
 
+/* ---- noise and blur ---- */
+
+/* Gradient of 1D lattice cell `cell` (cells repeat every 256): random sign, magnitude 0.5..1 in Q8 (128..255), from an
+ * integer hash, so no table and the same on every board. */
+static int32_t noise_grad(uint32_t cell)
+{
+    uint32_t h = (cell & 255u) * 2654435761u;
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    int32_t m = 128 + (int32_t)((h >> 8) & 127u);
+    return (h & 1u) ? -m : m;
+}
+
+/* 1D gradient (Perlin) noise at x (lattice units, Q16.16, x >= 0) -> 0..65536, middle 32768 at every lattice point.
+ * Quintic fade 6t^5 - 15t^4 + 10t^3. The value lies within +-0.5 (reached with opposite full gradients), mapped to
+ * 0..1, so the noise's minimum and maximum are the two colours exactly; most of it sits between. */
+static uint32_t noise1(int64_t x)
+{
+    int64_t t = x & 0xFFFF;
+    uint32_t cell = (uint32_t)((x - t) / 65536);
+    int64_t g0 = noise_grad(cell), g1 = noise_grad(cell + 1u);
+    int64_t lo = g0 * t, hi = g1 * (t - 65536);                              /* Q24 */
+    int64_t t2 = t * t / 65536, t3 = t2 * t / 65536;
+    int64_t f = t3 * (6 * t2 - 15 * t + 10 * 65536) / 65536;               /* Q16, 0..65536 */
+    int64_t v = lo + (hi - lo) * f / 65536;                                 /* Q24, within +-0.5 */
+    int64_t u = v / 256 + 32768;                                            /* to Q16, centred: -0.5..0.5 -> 0..1 */
+    return u < 0 ? 0u : u > 65536 ? 65536u : (uint32_t)u;
+}
+
+/* (fill-noise <buf> <low> <high> <scale> [offset] [start] [end]): smooth 1D Perlin noise, each pixel a blend from low
+ * (noise minimum) to high (maximum). scale: pixels per noise cell (feature size, > 0); offset: pixels to move the
+ * pattern by (an int or decimal of any size). Position counts from the range's start. Repeats every 256 x scale
+ * pixels, so offsets wrap seamlessly. */
+static value_t n_fill_noise(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    const bufref_t *b = &a[0].u.buf;
+    int64_t scale = a[3].u.i;                                               /* Q16.16 */
+    if (scale <= 0) { c->err = "fill-noise scale must be above 0 (pixels per noise cell)"; return a[0]; }
+    int32_t s, e;
+    if (!range(b, a, n, 5, &s, &e)) return a[0];
+    int64_t off = n > 4 && a[4].type == V_INT ? (int64_t)a[4].u.i * 65536 : n > 4 && a[4].type == V_FIX ? a[4].u.i : 0;
+    int64_t period = scale * 256;                                           /* Q16.16 pixels */
+    off %= period;
+    if (off < 0) off += period;
+    pixel_t lo = a[1].u.color, hi = a[2].u.color;
+    for (int32_t i = 0; i < e - s; i++) {
+        int64_t x = ((int64_t)i * 65536 + off) * 65536 / scale;             /* lattice units, Q16.16 */
+        *buf_at(b, s + i) = px_mix(lo, hi, (noise1(x) + 128u) >> 8);
+    }
+    return a[0];
+}
+
+/* Per byte, round((a + b + c) / 3): (sum + 1) * 21846 >> 16 is exact for sums 0..765. */
+static pixel_t px_avg3(pixel_t a, pixel_t b, pixel_t c)
+{
+    pixel_t out = 0;
+    for (int sh = 0; sh < 32; sh += 8) {
+        uint32_t sum = ((a >> sh) & 255u) + ((b >> sh) & 255u) + ((c >> sh) & 255u);
+        out |= (((sum + 1u) * 21846u) >> 16) << sh;
+    }
+    return out;
+}
+
+/* One blur pass over a view: each pixel moves k/256 of the way to the average of itself and its two neighbours, the
+ * ends counting as neighbours (a ring). Works in place, keeping the originals it still needs. */
+static void blur_pass(const bufref_t *v, uint32_t k)
+{
+    int32_t len = v->len;
+    pixel_t first = *buf_at(v, 0), prev = *buf_at(v, len - 1);
+    for (int32_t i = 0; i < len; i++) {
+        pixel_t cur = *buf_at(v, i), next = i + 1 < len ? *buf_at(v, i + 1) : first;
+        *buf_at(v, i) = px_mix(cur, px_avg3(prev, cur, next), k);
+        prev = cur;
+    }
+}
+
+#define BLUR_MAX 16
+
+/* (blur <buf> <amount> [start] [end]): soften a range, its ends wrapping round as neighbours. amount 0..16: 1 is one
+ * full 3-pixel box blur, its whole part is that many passes, a fraction a partial pass (0.5: halfway to it). */
+static value_t n_blur(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    (void)c;
+    const bufref_t *b = &a[0].u.buf;
+    int32_t s, e;
+    if (!range(b, a, n, 2, &s, &e) || e - s < 2 || a[1].u.i <= 0) return a[0];
+    int32_t amt = a[1].u.i > BLUR_MAX * 65536 ? BLUR_MAX * 65536 : a[1].u.i;   /* Q16.16 */
+    bufref_t v = { .px = buf_at(b, s), .len = (uint16_t)(e - s), .stride = b->stride };
+    int32_t whole = amt / 65536;
+    uint32_t k = ((uint32_t)(amt % 65536) + 128u) >> 8;
+    if (k >= UNIT_ONE) { whole++; k = 0; }
+    for (int32_t i = 0; i < whole; i++) blur_pass(&v, UNIT_ONE);
+    if (k) blur_pass(&v, k);
+    return a[0];
+}
+
 /* ---- environment ---- */
 static const char *const k_env_names[] = { "frame", "hour", "minute", "second", "year", "month", "day", "doy", "intensity", "npix",
                                            "sunrise", "sunset", "dawn", "dusk", "moon", "moonlit",
@@ -1914,6 +2009,8 @@ static const native_def_t k_natives[] = {
                                            A_COLOR, A_COLOR, A_COLOR, A_COLOR },                 0, NULL },
     { "get",    n_get,    V_COLOR, 2, 2,  { A_BUF, A_INT },                                       0, NULL },
     { "rotate", n_rotate, V_BUF,   2, 4,  { A_BUF, A_NUM, A_INT, A_INT },                         0, NULL },
+    { "blur",   n_blur,   V_BUF,   2, 4,  { A_BUF, A_NUM, A_INT, A_INT },                         0, NULL },
+    { "fill-noise", n_fill_noise, V_BUF, 4, 7, { A_BUF, A_COLOR, A_COLOR, A_NUM, A_NUMERIC, A_INT, A_INT }, 0, NULL },
     { "map-px", n_map_px, V_BUF,   3, 5,  { A_BUF, A_BUF, A_FN, A_INT, A_INT },                   0, bind_map_px },
     { "repeat", n_repeat, V_NIL,   2, 2,  { A_INT, A_FN },                                        0, bind_repeat },
     { "if",     n_if,     V_NIL,   2, 3,  { A_BOOL, A_ANY, A_ANY },                               NF_LAZY, bind_if },

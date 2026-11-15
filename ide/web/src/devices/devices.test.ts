@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildRestorePatch, DEFAULT_RESTORE, exportConfig, parseConfigFile } from './configFile';
+import { afterReboot, buildRestorePatch, DEFAULT_RESTORE, exportConfig, exportPrograms, parseConfigFile, restoreChoices } from './configFile';
 import { baseUrl, HttpTransport } from './http';
 import { LineFramer, type Link, SerialTransport } from './serial';
 import { ApiError, type BoardConfig } from './types';
@@ -64,6 +64,11 @@ class FakeBoard implements Link {
         case 'lib_get': this.lib.has(req.name) ? reply(200, { name: req.name, src: this.lib.get(req.name) }) : reply(404, { error: 'no such library program' }); break;
         case 'lib_put': if (req.src.includes('(fill')) { this.lib.set(req.name, req.src); reply(200, { ok: true }); } else reply(400, { error: 'line 1 col 1: bad' }); break;
         case 'lib_del': this.lib.delete(req.name); reply(200, { ok: true }); break;
+        case 'lib_mv':
+          if (!this.lib.has(req.name)) reply(404, { error: 'no such library program' });
+          else if (this.lib.has(req.to)) reply(400, { error: 'a library program of that name exists (lib rm it first)' });
+          else { this.lib.set(req.to, this.lib.get(req.name)!); this.lib.delete(req.name); reply(200, { ok: true, note: 'library program pals uses \'' + req.name + '\' and won\'t compile until changed' }); }
+          break;
         case 'exit': this.inApi = false; reply(200, { pong: true }); break;
         default: reply(404, { error: 'unknown op' });
       }
@@ -126,7 +131,13 @@ describe('serial transport against a simulated board', () => {
     expect((await t.libList()).programs).toEqual([{ name: 'sunset', size: 22 }]);
     expect(await t.libGet('sunset')).toBe('(fill (buf O) #FF8000)');
     await expect(t.libGet('gone')).rejects.toMatchObject({ status: 404 });
-    await t.libDel('sunset');
+    expect(await t.libRename('sunset', 'dusk')).toMatch(/pals uses 'sunset'/);
+    expect(await t.libGet('dusk')).toBe('(fill (buf O) #FF8000)');
+    await t.libPut('other', '(fill (buf O) #000000)');
+    await expect(t.libRename('dusk', 'other')).rejects.toMatchObject({ status: 400 });
+    await expect(t.libRename('gone', 'x')).rejects.toMatchObject({ status: 404 });
+    expect(await t.libDel('dusk')).toBeUndefined();
+    await t.libDel('other');
     expect((await t.libList()).programs).toEqual([]);
     await t.close();
   });
@@ -202,8 +213,11 @@ describe('http transport', () => {
     expect(await t.libGet('sunset')).toBe('(fill (buf O) #FF8000)');
     await t.libPut('sunset', '(fill (buf O) #FF0000)');
     await t.libDel('sunset');
-    expect(calls.map((c) => `${c.init.method} ${c.url}`)).toEqual(['GET http://b/api/lib', 'GET http://b/api/lib/sunset', 'PUT http://b/api/lib/sunset', 'DELETE http://b/api/lib/sunset']);
+    await t.libRename('sunset', 'dusk');
+    expect(calls.map((c) => `${c.init.method} ${c.url}`)).toEqual(['GET http://b/api/lib', 'GET http://b/api/lib/sunset', 'PUT http://b/api/lib/sunset',
+      'DELETE http://b/api/lib/sunset', 'PATCH http://b/api/lib/sunset']);
     expect(calls[2].init.body).toBe('(fill (buf O) #FF0000)');
+    expect(JSON.parse(calls[4].init.body as string)).toEqual({ name: 'dusk' });
   });
   it('explains auth and network failures', async () => {
     const { f } = mockFetch(() => Response.json({ error: 'missing or wrong token' }, { status: 401 }));
@@ -318,7 +332,54 @@ describe('config files', () => {
     expect(patch.hostname).toBeUndefined();
     expect(patch.wifi).toBeUndefined();
     const none = buildRestorePatch(file, board, { layout: false, programs: false, library: false, autoexec: false, automation: false, intensity: false, output: false, time: false,
-      hostname: true, wifiSsid: true, save: false });
+      hostname: true, wifiSsid: true, io: false, audioGate: false, save: false });
     expect(none.patch).toEqual({ hostname: 'strip-a', wifi: { ssid: 'home' } });
+  });
+  it('exports and restores GPIO slots whole, removing other slots on the board, within its slots and modes', () => {
+    const io = [{ n: 0, gpio: 4, mode: 'binary' as const, freq: 1000, invert: false, name: 'pump', pull: 'up' as const, debounce: 20, trigger: false },
+      { n: 2, gpio: 34, mode: 'audio' as const, freq: 1000, invert: false, name: 'mic', pull: 'none' as const, debounce: 20, trigger: false }];
+    const b = { ...board, io, io_max: 4, audio_gate: 18 };
+    const file = exportConfig(b, 'io');
+    expect(file.config.io).toEqual(io);
+    expect(file.config.audio_gate).toBe(18);
+    expect(file.version).toBe(1);                // full exports stay readable by older IDEs
+    const other = { ...board, io: [{ n: 1, gpio: 5, mode: 'pwm' as const, freq: 500, invert: true, name: 'fan' }], io_max: 4, audio_gate: 0 };
+    const { patch, skipped } = buildRestorePatch(file, other, DEFAULT_RESTORE);
+    expect(patch.io).toEqual({ 0: { gpio: 4, mode: 'binary', freq: 1000, invert: false, name: 'pump', pull: 'up', debounce: 20, trigger: false },
+      1: null, 2: { gpio: 34, mode: 'audio', freq: 1000, invert: false, name: 'mic', pull: 'none', debounce: 20, trigger: false } });
+    expect(patch.audio_gate).toBe(18);
+    expect(skipped).toEqual([]);
+    const old = buildRestorePatch(file, { ...other, io_max: 2 }, DEFAULT_RESTORE, ['binary', 'pwm']);   // fewer slots, no inputs
+    expect(old.patch.io).toEqual({ 0: { gpio: 4, mode: 'binary', freq: 1000, invert: false, name: 'pump' }, 1: null });
+    expect(old.skipped).toEqual([expect.stringContaining('GPIO slot 2')]);
+    expect(buildRestorePatch(file, other, { ...DEFAULT_RESTORE, io: false, audioGate: false }).patch).not.toHaveProperty('io');
+    expect(buildRestorePatch(file, board, DEFAULT_RESTORE).patch).not.toHaveProperty('audio_gate');   // older firmware
+    expect(parseConfigFile(JSON.stringify(file)).config.io).toHaveLength(2);
+    expect(() => parseConfigFile(JSON.stringify({ ...file, config: { ...file.config, io: [{ n: 0 }] } }))).toThrow(/GPIO slot/);
+  });
+  it('exports programs only, and restores just those (no layout or settings) from such a file', () => {
+    const b = { ...board, channels: board.channels.map((c, i) => ({ ...c, running: i < 2, prog: i === 2 ? '(x)' : c.prog })),
+      automation: '(play 0 sunset)', automation_every: 30, io: [], io_max: 4, audio_gate: 5 };
+    const lib = [{ name: 'sunset', src: '(fill (buf O) #FF8000)' }];
+    const file = parseConfigFile(JSON.stringify(exportPrograms(b, 'p', new Date(), lib)));
+    expect(file.programs_only).toBe(true);
+    expect(file.version).toBe(2);
+    expect(file.config.channels).toEqual(b.channels.map((c) => ({ prog: c.prog })));
+    expect(JSON.stringify(file)).not.toMatch(/strip-a|home|gpio/);
+    expect([...restoreChoices(file, b)].sort()).toEqual(['autoexec', 'automation', 'library', 'programs', 'save']);
+    const r = buildRestorePatch(file, b, { ...DEFAULT_RESTORE, hostname: true, wifiSsid: true });
+    expect(r.removals).toEqual([]);
+    expect(r.patch).toEqual({ channels: { 0: { prog: '(fill (buf O) #FF0000)' }, 1: { prog: '' } }, autoexec: b.autoexec,
+      automation: '(play 0 sunset)', automation_every: 30, save: true });
+    expect(r.skipped).toEqual([expect.stringContaining('channel 2')]);
+    expect(r.library).toEqual(lib);
+  });
+  it('after the reboot a new layout needs: programs, intensities and output for the channels now running, saved', () => {
+    const o = afterReboot({ ...DEFAULT_RESTORE, output: false });
+    expect(o).toEqual({ ...Object.fromEntries(Object.keys(DEFAULT_RESTORE).map((k) => [k, false])), programs: true, intensity: true, save: true });
+    const file = exportConfig({ ...board, channels: board.channels.map((c, i) => ({ ...c, prog: `(p${i})` })) }, 'x');
+    const p = buildRestorePatch(file, { ...board, channels: board.channels.map((c) => ({ ...c, running: true })) }, o);
+    expect(p.patch).toEqual({ channels: { 0: { prog: '(p0)' }, 1: { prog: '(p1)' }, 2: { prog: '(p2)' } }, intensity: board.intensity, save: true });
+    expect(p.skipped).toEqual([]);
   });
 });

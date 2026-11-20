@@ -6,7 +6,7 @@
 #include "arena.h"
 #include "pixel.h"
 
-#define DSL_MAX_ARGS         10     /* set: buf index + 8 colors. Arg arrays are sized per call, so this costs no stack */
+#define DSL_MAX_ARGS         16     /* cond / do / when, defn params. Arg arrays are sized per call, so this costs no stack */
 #define DSL_MAX_DEPTH        12     /* nesting depth limit of the source (parser recursion) */
 #define DSL_MAX_EVAL_STACK   6400   /* estimated evaluator stack in bytes, function calls included, checked at compile time */
 #define DSL_MAX_NODES        512    /* nodes per compiled program */

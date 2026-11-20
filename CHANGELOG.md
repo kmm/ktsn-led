@@ -3,6 +3,28 @@
 One version (`version.txt`) covers the firmware, the DSL, the console and HTTP API, and the IDE. Rules for bumping it
 are in CLAUDE.md ("Versioning"). Newest first; versions before 0.10.0 were not recorded here.
 
+## 0.33.0 (2026-11-19)
+- New: `(do form ...)` runs several forms in a row where one is expected, such as an `if` branch, and is the last
+  one's value: `(if c (do (set (buf O) 0 #FF0000) (set (buf O) 1 #FF0000)) (fill (buf O) #000000))`. In a defn its
+  last form can be the function calling itself, like an `if` branch.
+- New: `(cond test1 result1 test2 result2 ... [default])` picks the first result whose test is t, an if / else-if
+  chain without the nesting:
+  `(play-library 0 (cond (date-in "06-25" "07-05") "usa-" (date-in "10-01" "11-01") "ween-" "default-") 600)`.
+  With a default (or a final `t` test) it is a value, typed like `if`; any result can be a defn calling itself.
+- `do`, `when` and `cond` take up to 16 arguments, and a defn up to 16 parameters (was 10).
+- New: `(when cond form ...)` runs its forms only if `cond` is t: `(if cond (do form ...))` without the extra layer.
+- A list starting with a list, such as `((set ...) (set ...))`, now says to write `(do ...)`.
+- A program that defines its own function named `cond`, `do` or `when` now gets "is a built-in function".
+
+## 0.32.1 (2026-11-19)
+- `play-library` with a prefix no library program has is now a no-op (the channel keeps what it runs) instead of a
+  fault on every automation run. So is the rare case of the library changing while it picks.
+- The automation task's stack is 16 KB (was 8 KB). A `play` / `play-pick` / `play-library` compiles the library
+  program from inside the running automation program, and a deeply nested automation program playing a deeply
+  nested library program (worst of all one that fails to compile, which formats an error at its deepest point) could
+  run past 8 KB and reset the board. `automation` in the console and `automation.stack_free` in `/api/status` show
+  how much of it was never used.
+
 ## 0.32.0 (2026-11-15)
 - New: `(fill-noise <buf> <low> <high> <scale> [offset] [start] [end])` fills with smooth 1D Perlin noise, blending from
   `low` where the noise is lowest to `high` where it is highest. `scale` is the feature size in pixels; change `offset`

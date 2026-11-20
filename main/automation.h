@@ -16,6 +16,7 @@ typedef struct {
     int64_t     last_run;        /* epoch seconds (or uptime seconds before the time is set); -1 = never */
     bool        last_run_is_time;
     const char *last_err;        /* last fault, or NULL */
+    uint32_t    stack_free;      /* bytes of the task's stack never used (0 = not running) */
 } automation_status_t;
 
 void        automation_init(void);                     /* after render_start: compiles the stored program, starts the task */

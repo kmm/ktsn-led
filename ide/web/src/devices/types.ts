@@ -16,7 +16,7 @@ export interface BoardStatus {
   output_hz?: number; sends?: number;                // firmware with oversampled output
   intensity?: number;                                // global intensity now, 0..1 (mid-fade too)
   automation?: { active: boolean; every: number; runs: number; last_run?: string | null; last_run_uptime_s?: number;
-                 faults: number; last_error: string | null };
+                 faults: number; last_error: string | null; stack_free?: number };
   firmware?: FirmwareInfo;                           // firmware with version info (OTA builds and later)
   frame_us: Stat; flush_us: Stat;
   channels: { npix: number; nodes: number; faults: number; last_error: string | null; render_us: Stat; output_us: Stat; intensity?: number }[];

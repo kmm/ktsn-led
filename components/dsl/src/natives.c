@@ -686,6 +686,87 @@ static value_t n_if(exec_ctx_t *c, const value_t *a, uint8_t n)
     return r;
 }
 
+/* (do form...) runs its forms in order and is the last one's value; (when cond form...) runs them only if cond is t and
+ * is nothing. Forms before the last are run for what they do, so a plain value (or bare name) there is an error. The
+ * last form is in tail position when the do / when is (compile.c), so a defn can end a branch by calling itself. */
+static const char *check_seq(node_t *n, uint8_t first, uint8_t *bad)
+{
+    for (uint8_t i = first; i < n->nargs; i++) {
+        uint8_t t = arg_type(&n->args[i]);
+        if (t == V_SYM) { *bad = i; return "a bare name can't be a form here (a variable needs (def ...) first)"; }
+        if (i + 1 < n->nargs && !n->args[i].node) { *bad = i; return "this value does nothing here: only the last form's value is used"; }
+    }
+    return NULL;
+}
+static const char *bind_do(node_t *n, uint8_t *bad)
+{
+    const char *why = check_seq(n, 0, bad);
+    if (!why) n->ret = arg_type(&n->args[n->nargs - 1]);
+    return why;
+}
+static const char *bind_when(node_t *n, uint8_t *bad) { return check_seq(n, 1, bad); }
+static value_t run_seq(exec_ctx_t *c, uint8_t from, uint8_t n)
+{
+    const node_t *self = c->node;
+    value_t r = { .type = V_NIL };
+    for (uint8_t i = from; i < n && !c->err; i++) r = dsl_eval_arg(c, self, i);
+    if (c->err) r.type = V_NIL;
+    return r;
+}
+/* (cond test1 result1 test2 result2 ... [default]): the result of the first test that is t (only it runs), else the
+ * default (odd arg count; a final `t result` pair works the same), else nothing. Results are typed like if's branches;
+ * every result is in tail position. */
+static const char *bind_cond(node_t *n, uint8_t *bad)
+{
+    uint8_t ret = V_TAILCALL;
+    const arg_t *last = &n->args[n->nargs - 2];          /* no default (and no final t test): nothing when no test is t */
+    bool none = !(n->nargs & 1) && !(!last->node && last->val.type == V_BOOL && last->val.u.i);
+    for (uint8_t i = 0; i < n->nargs; i++) {
+        uint8_t t = arg_type(&n->args[i]);
+        bool test = (i & 1) == 0 && i + 1 < n->nargs;
+        if (t == V_SYM) { *bad = i; return test ? "a cond test can't be a bare name" : "a cond result can't be a bare name"; }
+        if (test) {
+            if (t != V_BOOL) { *bad = i; return "a cond test must be a boolean (t, nil, or a comparison); a default goes last"; }
+            continue;
+        }
+        if (t == V_TAILCALL) continue;
+        if (ret == V_TAILCALL || ret == t) ret = t;
+        else if (ret == V_NIL || t == V_NIL) ret = V_NIL;
+        else if (numeric(ret) && numeric(t)) ret = V_FIX;
+        else { *bad = i; return "'cond' results must have the same type"; }
+    }
+    n->ret = none ? V_NIL : ret;
+    return NULL;
+}
+static value_t n_cond(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    (void)a;
+    const node_t *self = c->node;
+    value_t nil = { .type = V_NIL };
+    uint8_t pick = n;
+    for (uint8_t i = 0; i + 1 < n; i += 2) {
+        value_t t = dsl_eval_arg(c, self, i);
+        if (c->err) return nil;
+        if (t.u.i) { pick = i + 1; break; }
+    }
+    if (pick == n && (n & 1)) pick = n - 1;              /* the default */
+    if (pick == n) return nil;
+    value_t r = dsl_eval_arg(c, self, pick);
+    if (c->err || self->ret == V_NIL) return nil;
+    if (self->ret == V_FIX) dsl_coerce(A_NUM, r, &r);     /* an int result of a mixed int/decimal cond */
+    return r;
+}
+static value_t n_do(exec_ctx_t *c, const value_t *a, uint8_t n) { (void)a; return run_seq(c, 0, n); }
+static value_t n_when(exec_ctx_t *c, const value_t *a, uint8_t n)
+{
+    (void)a;
+    value_t nil = { .type = V_NIL };
+    value_t cond = dsl_eval_arg(c, c->node, 0);
+    if (c->err || !cond.u.i) return nil;
+    run_seq(c, 1, n);
+    return nil;
+}
+
 /* ---- arithmetic: ints stay ints, any decimal makes a decimal (Q16.16). 64-bit intermediates, saturating results ---- */
 
 static int64_t q16(value_t v) { return v.type == V_FIX ? v.u.i : (int64_t)v.u.i * 65536; }
@@ -1651,7 +1732,7 @@ static value_t n_play_pick(exec_ctx_t *c, const value_t *a, uint8_t n)
 }
 
 /* (play-library ch prefix [period]): like play-pick, over the library programs whose names start with prefix (read
- * from the board's library when it runs, in name order; "" = all of them). */
+ * from the board's library when it runs, in name order; "" = all of them). No program with the prefix: a no-op. */
 static const char *bind_play_library(node_t *n, uint8_t *bad)
 {
     const value_t *p = &n->args[1].val;
@@ -1682,14 +1763,14 @@ static value_t n_play_library(exec_ctx_t *c, const value_t *a, uint8_t n)
     memcpy(prefix, a[1].u.str.p, a[1].u.str.len);
     prefix[a[1].u.str.len] = 0;
     int count = s_host->lib_match(prefix, -1, name);
-    if (count <= 0) { c->err = "play-library: no library program starts with that"; return v; }
+    if (count <= 0) return v;                            /* nothing has the prefix (yet): a no-op, not a fault */
     if (count > DSL_LIST_MAX) count = DSL_LIST_MAX;
     uint32_t seed = (uint32_t)a[0].u.i * 0x85EBCA6Bu ^ 0x4C494252u;
     for (int i = 0; prefix[i]; i++) seed = mix32(seed ^ (uint8_t)prefix[i]);
     strref_t pre = { prefix, a[1].u.str.len };
     int k = pick_for(c, a[0].u.i, count, seed, n > 2 ? &a[2] : &none, prefix_has, &pre);
     if (k < 0) return v;
-    if (s_host->lib_match(prefix, k, name) <= k) { c->err = "play-library: the library changed"; return v; }
+    if (s_host->lib_match(prefix, k, name) <= k) return v;   /* the library changed in between: try again next run */
     c->err = play_name(a[0].u.i, name);
     return v;
 }
@@ -2014,6 +2095,12 @@ static const native_def_t k_natives[] = {
     { "map-px", n_map_px, V_BUF,   3, 5,  { A_BUF, A_BUF, A_FN, A_INT, A_INT },                   0, bind_map_px },
     { "repeat", n_repeat, V_NIL,   2, 2,  { A_INT, A_FN },                                        0, bind_repeat },
     { "if",     n_if,     V_NIL,   2, 3,  { A_BOOL, A_ANY, A_ANY },                               NF_LAZY, bind_if },
+    { "cond",   n_cond,   V_NIL,   2, 16, { A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY,
+                                           A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY }, NF_LAZY, bind_cond },
+    { "do",     n_do,     V_NIL,   1, 16, { A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY,
+                                           A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY }, NF_LAZY, bind_do },
+    { "when",   n_when,   V_NIL,   2, 16, { A_BOOL, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY,
+                                           A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY, A_ANY }, NF_LAZY, bind_when },
     { "and",    n_and,    V_BOOL,  2, 10, { A_BOOL, A_BOOL, A_BOOL, A_BOOL, A_BOOL,
                                            A_BOOL, A_BOOL, A_BOOL, A_BOOL, A_BOOL },               NF_LAZY, NULL },
     { "or",     n_or,     V_BOOL,  2, 10, { A_BOOL, A_BOOL, A_BOOL, A_BOOL, A_BOOL,

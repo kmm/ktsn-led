@@ -33,6 +33,7 @@ static bool s_last_run_is_time;
 static char        s_playing[CHANNELS_MAX][LIB_NAME_MAX + 1];
 static const char *s_set_src[CHANNELS_MAX];
 static uint32_t    s_lib_gen[CHANNELS_MAX];
+static TaskHandle_t s_task;
 static char        s_err[DSL_ERR_LEN + 32];           /* fault text handed back to the evaluator (one run at a time) */
 
 static bool unchanged(int ch, const char *name)
@@ -201,6 +202,7 @@ void automation_get_status(automation_status_t *st)
     st->last_err = s_ch.perf.last_err;
     st->last_run = s_last_run;
     st->last_run_is_time = s_last_run_is_time;
+    st->stack_free = s_task ? (uint32_t)uxTaskGetStackHighWaterMark(s_task) : 0;    /* bytes on ESP-IDF */
 }
 
 void automation_init(void)
@@ -218,5 +220,5 @@ void automation_init(void)
             g_set.automation = NULL;                       /* kept in flash until the next save; fix it with `automation` */
         } else ESP_LOGI(TAG, "running every %u s", g_set.auto_every);
     }
-    xTaskCreate(task, "automation", AUTOMATION_STACK, NULL, tskIDLE_PRIORITY + 2, NULL);
+    xTaskCreate(task, "automation", AUTOMATION_STACK, NULL, tskIDLE_PRIORITY + 2, &s_task);
 }

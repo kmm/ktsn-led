@@ -125,6 +125,7 @@ api_result_t api_status(void)
     cJSON_AddNumberToObject(au, "faults", as.faults);
     if (as.last_err) cJSON_AddStringToObject(au, "last_error", as.last_err);
     else cJSON_AddNullToObject(au, "last_error");
+    cJSON_AddNumberToObject(au, "stack_free", as.stack_free);
     cJSON *ios = cJSON_AddArrayToObject(j, "io");
     for (int i = 0; i < IO_MAX; i++) {
         if (g_set.io[i].gpio < 0) continue;

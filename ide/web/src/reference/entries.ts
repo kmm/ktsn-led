@@ -332,6 +332,39 @@ export const ENTRIES: Entry[] = [
     example: '(fill (buf O) (if (lt (env second) 30) #FF0000 #0000FF))',
   },
   {
+    name: 'cond', category: 'Logic', summary: 'Pick the first of several branches whose test is t: an if/else-if chain without the nesting.',
+    args: [{ name: 'test', type: 'boolean', desc: 'a boolean: t, nil, or a comparison' },
+      { name: 'result', type: 'value', desc: 'used when its test is the first that is t' },
+      { name: 'more', type: 'value', desc: 'more test result pairs, then an optional default', optional: true, many: 14 }],
+    returns: 'the picked result\'s value (nothing without a default when no test is t)',
+    details: 'Tests and results alternate: (cond test1 result1 test2 result2 … default). The tests are checked in order ' +
+      'and only the first true one\'s result runs; if none is t, the default (an odd last argument) runs, or nothing. ' +
+      'A last pair whose test is t works as a default too. With a default, cond is a value of its results\' common type, ' +
+      'like if (an int and a decimal give a decimal). For several forms in one result, use (do …). In a defn, any ' +
+      'result may be the function calling itself (a loop). Up to 7 tests and a default; for more, put another cond in ' +
+      'the default.',
+    example: '(fill (buf O) (cond (lt (env hour) 6) #000010\n                   (lt (env hour) 18) #FFD080\n                   (lt (env hour) 22) #FF6000\n                   #000010))',
+  },
+  {
+    name: 'do', category: 'Logic', summary: 'Run several forms in a row where one is expected, e.g. in an if branch.',
+    args: [{ name: 'form', type: 'value', desc: 'calls run in order; the last may be a value', many: 16 }],
+    returns: 'the last form\'s value',
+    details: 'Runs each form in order. Its value is the last one\'s, so (do (set ...) 3) is an int and fits wherever an int ' +
+      'does. Forms before the last are run for what they do, so a plain value there is an error, and def only works at ' +
+      'the top of a program or function body, not inside do. In a defn, the last form may be the function calling ' +
+      'itself (a loop), like an if branch. A fault stops the rest. Up to 16 forms.',
+    example: '(fill (buf O) #000000)\n(if (lt (env second) 30)\n  (do (set (buf O) 0 #FF0000) (set (buf O) 1 #FF0000))\n  (set (buf O) 2 #0000FF))',
+  },
+  {
+    name: 'when', category: 'Logic', summary: 'Run several forms in a row if a condition is t.',
+    args: [{ name: 'cond', type: 'boolean', desc: 'a boolean: t, nil, or a comparison' },
+      { name: 'form', type: 'value', desc: 'calls run in order when cond is t', many: 15 }],
+    returns: 'nothing',
+    details: 'The same as (if cond (do form ...)): a statement with no else. The last form may be a defn calling itself ' +
+      '(a loop). Up to 15 forms.',
+    example: '(fill (buf O) #000000)\n(when (ge (env hour) 18)\n  (fill (buf O) #301000)\n  (set (buf O) 0 #FF8000))',
+  },
+  {
     name: 'and', category: 'Logic', summary: 't if all conditions are t; stops at the first nil.',
     args: [{ name: 'a', type: 'boolean', desc: 'condition' }, { name: 'b', type: 'boolean', desc: 'more conditions', many: 9 }],
     returns: 'boolean',
@@ -626,8 +659,8 @@ export const ENTRIES: Entry[] = [
       'name starts with the prefix, in name order, read each time it runs. To add a program to the rotation, save it ' +
       'to the library with a name that has the prefix; no change to the automation program needed. Adding or removing ' +
       'one changes the shuffle from the next period on.\n\nThe library can change after the automation program is ' +
-      'saved, so the prefix can\'t be checked against it when compiling: if no program has it, that is a fault when ' +
-      'it runs.',
+      'saved, so the prefix can\'t be checked against it when compiling: if no program has it when it runs, nothing ' +
+      'happens (no fault), and the channel keeps what it runs.',
     example: '(play-library 0 "party-" 600)   ; party-fire, party-rain, …: a new one every 10 minutes',
   },
   {
@@ -834,7 +867,7 @@ export const ENTRIES: Entry[] = [
     name: 'defn', category: 'Functions', summary: 'Define a function: a name, typed parameters and a body, usable anywhere in the program.',
     args: [
       { name: 'name', type: 'name', desc: 'a letter, then letters, digits, - or _ (up to 15); not a built-in function' },
-      { name: 'params', type: 'parameters', desc: '(name:type …), up to 10; types int decimal color bool buf str' },
+      { name: 'params', type: 'parameters', desc: '(name:type …), up to 16; types int decimal color bool buf str' },
       { name: 'body', type: 'body', desc: 'one or more forms; the last one\'s value is the result', many: 2 },
     ],
     returns: 'nothing (calling the function gives its body\'s value)',
@@ -945,7 +978,7 @@ export const TOPICS: Topic[] = [
   },
   {
     id: 'logic', title: 'Booleans and conditions',
-    body: 'Booleans are their own kind: t and nil. Conditions (if, and, or, not) take only booleans; a number is never true ' +
+    body: 'Booleans are their own kind: t and nil. Conditions (if, cond, when, and, or, not) take only booleans; a number is never true ' +
       'or false by itself, so compare it: (if (gt x 0) …). Comparisons (lt gt le ge eq ne) return booleans.',
   },
   {

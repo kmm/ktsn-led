@@ -468,6 +468,7 @@ static int cmd_automation(cmd_out_t *o, int argc, char **argv)
             out_printf(o, "  runs %lu, last %s\n", (unsigned long)st.runs, tb);
         } else out_printf(o, "  runs %lu, last at uptime %llds (clock not set)\n", (unsigned long)st.runs, (long long)st.last_run);
         if (st.faults) out_printf(o, "  faults %lu, last: %s\n", (unsigned long)st.faults, st.last_err ? st.last_err : "?");
+        if (st.stack_free) out_printf(o, "  stack: %lu of %u B never used\n", (unsigned long)st.stack_free, (unsigned)AUTOMATION_STACK);
         return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "clear")) { automation_set(NULL, err, sizeof err); out_puts(o, "automation cleared (save to persist)"); return 0; }

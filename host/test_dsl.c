@@ -2427,8 +2427,14 @@ static void t_play_pick(channel_t *ch)
     CHECK(run(ch, "(play-library 0 \"party\")", e) == 0 && fh.plays == p0 + 1 && !strncmp(fh.last_name, "party-", 6));
     fh_playing_name[0] = NULL;
     CHECK(run(ch, "(play-library 0 \"\" 60)", e) == 0);    /* "" = the whole library */
+    p0 = fh.plays;                                         /* a cond-picked prefix (the seasonal pattern) */
+    CHECK(run(ch, "(def interval 60) (play-library 0 (cond (date-in \"06-25\" \"07-05\") \"usa-\" (date-in \"10-01\" \"11-01\") \"ween-\" "
+                  "(date-in \"11-15\" \"02-02\") \"xmas-\" \"party-\") interval)", e) == 0);
+    CHECK(fh.plays == p0 + 1 && !strncmp(fh.last_name, "party-", 6));
     f0 = ch->perf.faults;
-    CHECK(run(ch, "(play-library 0 \"zzz\")", e) == 0 && ch->perf.faults == f0 + 1);
+    p0 = fh.plays;
+    CHECK(run(ch, "(play-library 0 \"zzz\")", e) == 0 && ch->perf.faults == f0 && fh.plays == p0);    /* no match: a no-op */
+    CHECK(run(ch, "(play-library 0 \"zzz\" 60)", e) == 0 && ch->perf.faults == f0 && fh.plays == p0);
     expect_err(ch, "(play-library 0 \"Party\")", "lower case");
     expect_err(ch, "(play-library 0 \"party\" 0)", "at least 1");
     static const dsl_host_t bare = { fh_n, fh_get, fh_set, fh_play, fh_stop, fh_exists, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
@@ -2465,6 +2471,83 @@ static void expect_err(channel_t *ch, const char *src, const char *want)
 static int64_t g_now;
 static int64_t fake_clock(void) { return g_now++; }
 
+/* (do ...) and (when ...): forms in a row, inline */
+static void t_seq(channel_t *ch)
+{
+    char e[DSL_ERR_LEN];
+    CHECK(run(ch, "(fill (buf O) #000000) (if (lt 1 2) (do (set (buf O) 0 #FF0000) (set (buf O) 1 #00FF00)) (set (buf O) 2 #0000FF))", e) == 0);
+    CHECK(ch->buf[BUF_O][0] == 0xFF0000 && ch->buf[BUF_O][1] == 0x00FF00 && ch->buf[BUF_O][2] == 0);
+    CHECK(run(ch, "(fill (buf O) #000000) (if (gt 1 2) (do (set (buf O) 0 #FF0000) (set (buf O) 1 #00FF00)) (set (buf O) 2 #0000FF))", e) == 0);
+    CHECK(ch->buf[BUF_O][0] == 0 && ch->buf[BUF_O][1] == 0 && ch->buf[BUF_O][2] == 0x0000FF);
+    CHECK(holds(ch, "", "(eq (do (set (buf X) 0 #FFFFFF) 5) 5)"));                          /* the last form's value */
+    CHECK(holds(ch, "(def k (if (gt (env frame) -1) (do (set (buf X) 0 #FFFFFF) 2.5) 1))", "(eq k 2.5)"));   /* typed: decimal */
+    CHECK(holds(ch, "(def k (do 7))", "(eq k 7)"));
+    CHECK(holds(ch, "(def k (do (set (buf X) 0 #123456) (get (buf X) 0)))", "(eq k #123456)"));   /* in order */
+    CHECK(run(ch, "(fill (buf O) #000000) (when (lt 1 2) (set (buf O) 0 #FF0000) (set (buf O) 1 #00FF00))", e) == 0);
+    CHECK(ch->buf[BUF_O][0] == 0xFF0000 && ch->buf[BUF_O][1] == 0x00FF00);
+    CHECK(run(ch, "(fill (buf O) #000000) (when (gt 1 2) (set (buf O) 0 #FF0000) (set (buf O) 1 #00FF00))", e) == 0);
+    CHECK(ch->buf[BUF_O][0] == 0 && ch->buf[BUF_O][1] == 0);
+    /* a fault stops the rest */
+    uint32_t f0 = ch->perf.faults;
+    CHECK(run(ch, "(fill (buf O) #000000) (def z (- (env frame) (env frame))) (do (set (buf O) 0 #FFFFFF) (def q (/ 1 z)) (set (buf O) 1 #FFFFFF))", e) != 0);
+    CHECK(run(ch, "(fill (buf O) #000000) (def z (- (env frame) (env frame))) (do (set (buf O) 0 #FFFFFF) (/ 1 z) (set (buf O) 1 #FFFFFF))", e) == 0);
+    CHECK(ch->perf.faults == f0 + 1 && ch->buf[BUF_O][0] == 0xFFFFFF && ch->buf[BUF_O][1] == 0);
+    /* the last form is a tail position: loops */
+    CHECK(run(ch, "(fill (buf O) #000000) (defn dots (i:int) (when (lt i 8) (set (buf O) i #FFFFFF) (dots (+ i 2)))) (dots 0)", e) == 0);
+    for (int i = 0; i < 10; i++) CHECK(ch->buf[BUF_O][i] == (i % 2 == 0 && i < 8 ? 0xFFFFFFu : 0u));
+    CHECK(holds(ch, "(defn sum (i:int acc:int) (if (gt i 0) (do (set (buf X) 0 #010101) (sum (- i 1) (+ acc i))) acc))", "(eq (sum 100 0) 5050)"));
+    /* errors */
+    expect_err(ch, "(defn f (x:int) (if t (do (f x) 1) 0))", "calls itself here");
+    expect_err(ch, "(defn f (x:int) (do (set (buf O) 0 #FFFFFF) (f x)))", "'f' never returns");
+    expect_err(ch, "(do 1 (fill (buf O) #000000))", "does nothing");
+    expect_err(ch, "(when t #FF0000 (fill (buf O) #000000))", "does nothing");
+    expect_err(ch, "(do)", "'do' takes 1 to 16 arguments");
+    expect_err(ch, "(when t)", "'when' takes 2 to 16 arguments");
+    CHECK(holds(ch, "(def k (do 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))", "(eq k 16)") == false);   /* constants first: an error */
+    CHECK(run(ch, "(fill (buf O) #000000) (do (set (buf O) 0 #000001) (set (buf O) 1 #000002) (set (buf O) 2 #000003) (set (buf O) 3 #000004) (set (buf O) 4 #000005) (set (buf O) 5 #000006) (set (buf O) 6 #000007) (set (buf O) 7 #000008) (set (buf O) 0 #000009) (set (buf O) 1 #00000A) (set (buf O) 2 #00000B) (set (buf O) 3 #00000C) (set (buf O) 4 #00000D) (set (buf O) 5 #00000E) (set (buf O) 6 #00000F) (set (buf O) 7 #000010))", e) == 0
+          && ch->buf[BUF_O][0] == 9 && ch->buf[BUF_O][7] == 16);   /* 16 forms, in order */
+
+    /* cond: the first true test's result, else the default, else nothing */
+    static const struct { const char *expr; int want; } conds[] = {
+        { "(cond t 1 2)", 1 }, { "(cond nil 1 2)", 2 }, { "(cond nil 1 t 2 3)", 2 }, { "(cond nil 1 nil 2 3)", 3 },
+        { "(cond (gt 1 2) 1 (lt 1 2) 2 3)", 2 }, { "(cond nil 1 t 2)", 2 },
+        { "(cond nil 1 nil 2 nil 3 nil 4 nil 5 nil 6 nil 7 8)", 8 }, { "(cond nil 1 nil 2 nil 3 nil 4 nil 5 nil 6 nil 7 t 8)", 8 },
+    };
+    for (size_t i = 0; i < sizeof conds / sizeof conds[0]; i++) {
+        char d[160], w[24];
+        snprintf(d, sizeof d, "(def k %s)", conds[i].expr);
+        snprintf(w, sizeof w, "(eq k %d)", conds[i].want);
+        if (!holds(ch, d, w)) { printf("  %s\n", conds[i].expr); CHECK(0); }
+    }
+    CHECK(holds(ch, "(def k (cond nil 1 t 2.5 3))", "(eq k 2.5)"));                         /* int / decimal: decimal */
+    CHECK(holds(ch, "(def k (cond t 1 2.5))", "(eq k 1.0)"));
+    CHECK(holds(ch, "(def p (cond (gt (env frame) -1) \"usa-\" \"default-\"))", "(eq (str-len p) 4)"));   /* a string value */
+    CHECK(run(ch, "(fill (buf O) #000000) (cond nil (set (buf O) 0 #FF0000) (lt 1 2) (set (buf O) 1 #00FF00) (set (buf O) 2 #0000FF))", e) == 0);
+    CHECK(ch->buf[BUF_O][0] == 0 && ch->buf[BUF_O][1] == 0x00FF00 && ch->buf[BUF_O][2] == 0);   /* only the picked result runs */
+    CHECK(run(ch, "(fill (buf O) #000000) (cond nil (set (buf O) 0 #FF0000) nil (set (buf O) 1 #00FF00))", e) == 0);
+    CHECK(ch->buf[BUF_O][0] == 0 && ch->buf[BUF_O][1] == 0);                                     /* none: nothing */
+    CHECK(run(ch, "(fill (buf O) #000000) (def n 0) (cond (do (set (buf O) 0 #FFFFFF) nil) 1 (do (set (buf O) 1 #FFFFFF) t) 2 "
+                  "(do (set (buf O) 2 #FFFFFF) t) 3)", e) == 0);
+    CHECK(ch->buf[BUF_O][0] && ch->buf[BUF_O][1] && !ch->buf[BUF_O][2]);                        /* tests stop at the first t */
+    CHECK(holds(ch, "(defn sum (i:int acc:int) (cond (le i 0) acc (eq (mod i 2) 0) (sum (- i 1) (+ acc i)) (sum (- i 1) (+ acc i))))",
+                "(eq (sum 100 0) 5050)"));                                                     /* results are tails */
+    expect_err(ch, "(defn f (x:int) (cond (f x) 1 2))", "calls itself here");                   /* tests aren't */
+    expect_err(ch, "(defn f (x:int) (cond t (f 1) (f 2)))", "'f' never returns");
+    expect_err(ch, "(cond 1 2 3)", "a cond test must be a boolean");
+    expect_err(ch, "(fill (buf O) (cond t #FF0000 3))", "'cond' results must have the same type");
+    expect_err(ch, "(fill (buf O) (cond (gt (env frame) -1) #FF0000))", "returns nothing");               /* no default: not a value */
+    CHECK(holds(ch, "(fill (buf X) (cond nil #000000 t #FF0000))", "(eq (get (buf X) 0) #FF0000)"));   /* a final t is a default */
+    expect_err(ch, "(cond t)", "'cond' takes 2 to 16 arguments");
+    expect_err(ch, "(defn cond (x:int) x)", "'cond' is a built-in function");
+    expect_err(ch, "(do (def x 1) x)", "def only works at the top level");
+    expect_err(ch, "(fill (buf O) (if t (do (set (buf X) 0 #FFFFFF) 1) #FF0000))", "same type");
+    expect_err(ch, "(when 3 (fill (buf O) #000000))", "expected");
+    expect_err(ch, "((fill (buf O) #FF0000) (fill (buf X) #00FF00))", "(do form1 form2 ...)");
+    expect_err(ch, "(if t ((fill (buf O) #FF0000) (fill (buf X) #00FF00)))", "(do form1 form2 ...)");
+    expect_err(ch, "(defn do (x:int) x)", "'do' is a built-in function");
+    expect_err(ch, "(defn when (x:int) x)", "'when' is a built-in function");
+}
+
 static void t_functions(channel_t *ch)
 {
     char e[DSL_ERR_LEN];
@@ -2477,6 +2560,8 @@ static void t_functions(channel_t *ch)
     CHECK(holds(ch, "(defn n (s:str) (str-len s))", "(eq (n \"abc\") 3)"));
     CHECK(holds(ch, "(defn len (b:buf) (- (str-len (str-num 5)) 1))", "(eq (len (buf O)) 0)"));
     CHECK(holds(ch, "(defn one () 1)", "(eq (one) 1)"));
+    CHECK(holds(ch, "(defn s16 (a:int b:int c:int d:int e:int f:int g:int h:int i:int j:int k:int l:int m:int n:int o:int p:int) (+ a p))",
+                "(eq (s16 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16) 17)"));                            /* 16 parameters */
     CHECK(holds(ch, "(defn id (c:color) c)", "(eq (id #123456) #123456)"));                   /* a value as the body */
     CHECK(holds(ch, "(defn k () #FF0000)", "(eq (k) #FF0000)"));                              /* a constant body */
     /* several forms, locals, a parameter reassigned; a statement function */
@@ -2570,7 +2655,7 @@ static void t_functions(channel_t *ch)
         { "(defn f (x:float) x)",                               "unknown parameter type 'float'" },
         { "(defn f (a.b:int) 1)",                               "bad parameter name" },
         { "(defn f (x:int x:int) x)",                           "parameter 'x' appears twice" },
-        { "(defn f (a:int b:int c:int d:int e:int f:int g:int h:int i:int j:int k:int) 1)", "too many parameters" },
+        { "(defn f (a:int b:int c:int d:int e:int f:int g:int h:int i:int j:int k:int l:int m:int n:int o:int p:int q:int) 1)", "too many parameters (max 16)" },
         { "(defn g (x:int) x) (defn f (g:int) g)",              "'g' is already a function name" },
         { "(defn g (x:int) x) (def g 1)",                       "'g' is already a function name" },
         { "(if t (defn f (x:int) x))",                          "defn only works at the top level" },
@@ -3069,7 +3154,7 @@ int main(void)
 {
     CHECK(globals_init(&globals, 10) == 0);
     with_channel(t_fill); with_channel(t_scale_and_persistence); with_channel(t_invert); with_channel(t_nesting_globals);
-    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_use); with_channel(t_lists); with_channel(t_palette); t_fill_noise(); with_channel(t_blur); with_channel(t_play_pick); t_astro(); t_audio(); with_channel(t_errors); with_channel(t_swap_atomic);
+    with_channel(t_slice); with_channel(t_slice_negative_step); with_channel(t_copy); with_channel(t_screen); with_channel(t_blends); with_channel(t_env); with_channel(t_fill_grad); with_channel(t_grad_map); with_channel(t_fill_random); with_channel(t_set_get); with_channel(t_rotate); with_channel(t_logic); with_channel(t_arith); with_channel(t_math_helpers); with_channel(t_env_npix); with_channel(t_env_time); with_channel(t_time_cmp); with_channel(t_seg7); with_channel(t_strings); with_channel(t_seg_text); with_channel(t_automation); with_channel(t_io); with_channel(t_inputs); with_channel(t_two_step_and_long); with_channel(t_fill_pat); with_channel(t_vars); with_channel(t_functions); with_channel(t_seq); with_channel(t_use); with_channel(t_lists); with_channel(t_palette); t_fill_noise(); with_channel(t_blur); with_channel(t_play_pick); t_astro(); t_audio(); with_channel(t_errors); with_channel(t_swap_atomic);
     t_arena(); t_ws_parallel(); t_gamma(); t_dither(); t_wire(); t_wire_white(); t_wire_wmode(); t_fader(); t_intensity16(); t_px_scale_exhaustive(); t_blend_math(); t_stats();
     for (int i = 0; i < DSL_NUM_GLOBALS; i++) free(globals.buf[i]);
     printf("%d checks, %d failed\n", g_checks, g_fail);

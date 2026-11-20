@@ -424,6 +424,10 @@ static node_t *compile_call(cc_t *cc, const ast_t *lst)
     ps_t *ps = cc->ps;
     const ast_t *h = lst->child;
     if (!h) { perr(ps, lst->at, "empty list"); return NULL; }
+    if (h->kind == K_LIST) {
+        perr(ps, h->at, "a list can't start with a list; to run forms in a row: (do form1 form2 ...)");
+        return NULL;
+    }
     if (h->kind != K_SYM) { perr(ps, h->at, "expected a function name after '('"); return NULL; }
     bool tail = cc->tail;                                /* only this call, not its arguments */
     cc->tail = false;
@@ -472,14 +476,15 @@ static node_t *compile_call(cc_t *cc, const ast_t *lst)
 
     int i = 0;
     uint16_t deepest = uf ? uf->stack : 0;               /* the deepest argument, or the body the call runs */
-    bool is_if = !strcmp(def->name, "if");
+    bool is_if = !strcmp(def->name, "if"), is_seq = !strcmp(def->name, "do") || !strcmp(def->name, "when");
+    bool is_cond = !strcmp(def->name, "cond");
     for (const ast_t *a = h->next; a; a = a->next, i++) {
         atype_t want = (atype_t)def->args[i];
         /* NF_IDARG: a bare name (not a variable, t or nil) in the first position goes to the bind hook as a symbol */
         if (i == 0 && (def->flags & NF_IDARG) && a->kind == K_SYM && strcmp(a->s, "_") && strcmp(a->s, "t") && strcmp(a->s, "nil")
             && find_var(cc, a->s) < 0) want = A_SYM;
         if (i == 1 && (def->flags & NF_NAME1) && a->kind == K_SYM && strcmp(a->s, "_")) want = A_SYM;   /* (play 0 fire) */
-        cc->tail = tail && is_if && i > 0;               /* an if's branches are in tail position if the if is */
+        cc->tail = tail && ((is_if && i > 0) || (is_seq && !a->next) || (is_cond && ((i & 1) || !a->next)));   /* branches */
         bool ok = compile_arg(cc, a, want, i >= def->min_args || (i == 0 && (def->flags & NF_OPT0)), &args[i]);
         cc->tail = false;
         if (!ok) return NULL;

@@ -253,6 +253,9 @@ Programs sent over HTTP may be up to 3999 characters, span several lines and con
     (rotate <buf> <amount> [start] [end])       + right, - left; fractional = sub-pixel -> buf
     (blur <buf> <amount> [start] [end])         0..16 passes of a 3-pixel blur, ends wrap -> buf
     (if <cond> <then> [else])                   runs one branch; its value    -> branch type
+    (cond test result ... [default])            first true test's result      -> result type
+    (do form ...)                               forms in a row (up to 16)     -> the last one's value
+    (when <cond> form ...)                      forms in a row if cond is t   -> nothing
     (and a b ...) (or a b ...) (not a)          short-circuit logic           -> boolean
     (lt a b) (gt a b) (le a b) (ge a b)         compare numbers               -> boolean
     (eq a b) (ne a b)                           numbers/colors/booleans/bufs  -> boolean

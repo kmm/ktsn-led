@@ -594,7 +594,10 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   automation program have no clock limit, only the node budget. The core is built with -O2 (components/dsl/CMakeLists.txt).
   `map-px` / `repeat` give back the scratch a call used after each call, unless the fn stores a string in an enclosing
   variable (`UF_KEEP`, set by `compile_def`). A body form that is a constant becomes a `dsl_const` node.
-  Render/automation stacks raised to 8 KB (`RENDER_STACK`, `AUTOMATION_STACK`).
+  Render/automation stacks raised to 8 KB (`RENDER_STACK`, `AUTOMATION_STACK`). 0.32.1: automation 16 KB, because
+  play/play-pick/play-library run `dsl_compile` nested inside the evaluator (eval up to DSL_MAX_EVAL_STACK 6400 B +
+  compile ~250 B per nesting level on Xtensa/RISC-V, measured with -fstack-usage, + vsnprintf on a compile error);
+  high-water mark in `automation` (console) and `automation.stack_free` (status).
 - **Libraries** (`use`, 0.15.0, step 2 of user functions): `(use name)` is top level only; a used program may contain
   only defn/use (and def from 0.27.0, see below). compile.c: `unit_t` per source (0 = the program; `DSL_MAX_USES` 8 libraries), `scan_unit` walks the uses
   depth first through `dsl_host_t.lib_load` (malloc'd, the core frees it; optional `lib_why` says why a name can't be
@@ -639,11 +642,22 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
   list-pick = `channel_t.id` (set in main.c) x list id; play-pick = target channel x list id; play-library = target
   channel x prefix. `play-pick ch list [period]` / `play-library ch prefix [period]` (automation): without a period,
   keep what automation put there if it is in the list / has the prefix (`dsl_host_t.playing`), else a random one
-  (channel rng). play-library reads names through `dsl_host_t.lib_match` (firmware: progs_list + qsort, at most 255;
+  (channel rng). play-library reads names through `dsl_host_t.lib_match` (firmware: progs_list + qsort, at most 255; no match, or the library changing between count and pick = a no-op
+  since 0.32.1, not a fault;
   WASM: the board's library list, offline the prefix itself). `play` takes A_STR with `NF_NAME1`: a bare name is
   always the program's name (V_SYM, never a variable, as before), a string may be made at run time (bad name =
   fault); constant names are checked when compiling everywhere (play, play-pick lists).
-- **Lazy natives** (`NF_LAZY`: `if`, `and`, `or`) get `args == NULL`, read `c->node` on entry and evaluate their own args
+- **`cond test result ... [default]`** (0.33.0): flat pairs (Clojure style), lazy, A_ANY args checked in
+  `bind_cond` (tests V_BOOL, results unified like if's branches; no default = V_NIL, a final constant `t` test counts as
+  a default). Every result position is a tail position. Classic `(cond ((test) form...))` clauses were rejected: a list
+  headed by a list is the `(do ...)` hint, and it adds a level per clause. DSL_MAX_ARGS 10 -> 16 for cond / do / when
+  (and defn params); other natives keep their max_args. Costs 6 B of flash per native table entry, no stack.
+- **`do` / `when`** (0.33.0): lazy natives over A_ANY args (max 16, DSL_MAX_ARGS). `bind_do` types the node by its
+  last arg; a constant or bare name before the last is a compile error ("does nothing"). The last form is in tail
+  position when the do / when is (compile_call's `is_seq`, next to the if-branch rule). No `def` inside (compile_call's
+  "def only works at the top level"). A list whose head is a list gets a hint to write `(do ...)`; `((a) (b))` is not
+  accepted as sugar (an extra pair of parentheses would become silently valid).
+- **Lazy natives** (`NF_LAZY`: `if`, `do`, `when`, `and`, `or`) get `args == NULL`, read `c->node` on entry and evaluate their own args
   with `dsl_eval_arg`. Use this for anything that must not evaluate all args (short-circuit, branches).
 - **Result types:** each node has `ret` (= `def->ret` unless the bind hook refines it, e.g. `if` takes its branches' common
   type; int + decimal -> decimal; no else or a nothing-branch -> statement). Type checks use `node->ret`, not `def->ret`.
@@ -678,6 +692,8 @@ compiled to a cached linked list, and run once per frame (60 Hz) per channel.
     (rotate <buf> <amount> [start] [end])      rotate range right (+) / left (-); within 0.01 of an int: whole
                                                pixels, else sub-pixel (linear blend). In place.
     (if <cond> <then> [else])                  lazy; value of the taken branch (statement without else)
+    (cond t1 r1 t2 r2 ... [default])           lazy; the first true test's result (nothing without a default)
+    (do form ...) / (when <cond> form ...)     lazy; forms in a row (do = the last one's value, when = nothing)
     (and <a> <b>...) (or <a> <b>...) (not <a>) booleans, short-circuit, 2..10 args
     (lt a b) (gt a b) (le a b) (ge a b)        numbers -> boolean
     (eq a b) (ne a b)                          numbers, colors, booleans or buffers -> boolean
@@ -786,7 +802,14 @@ Console: `version` (what runs, slot, unconfirmed update?, other slot), `prog <ch
   spread symmetric round the ring and keep the total, above 16 clamps, a range is its own ring, strided slices, one
   pixel no-op), IDE tests (reference examples on the real core), checked by Claude in the dev-server preview (both
   reference examples run with no faults). **Verified by the user on the board** (2026-11-15).
-Host tests: 6230 checks, 0 failures (macOS clang and gcc). **Builds cleanly with ESP-IDF v6.1 for esp32, flashed and running; RGB color order confirmed on the WS2811 string.**
+- play-library no-op and 16 KB automation stack (0.32.1, 2026-11-19): host-tested (no match = no fault, no play, with
+  and without a period); stack sizes measured with -fstack-usage on Xtensa and RISC-V. The crash the user saw before is
+  not yet reproduced or confirmed fixed: if it recurs, check `automation`'s stack line and the panic log.
+- `do` / `when` / `cond`, DSL_MAX_ARGS 16 (0.33.0, 2026-11-19): host-tested (`t_seq`: order, values and types, faults
+  stop the rest, tail loops through do / when / cond results, cond picks / default / final t / none, tests stop at
+  the first t, 16 forms and 16 defn params, the error messages; the seasonal cond prefix pattern in `t_play_pick`), IDE
+  tests (reference arg counts and examples). **Verified by the user on the board** (2026-11-19).
+Host tests: 6294 checks, 0 failures (macOS clang and gcc). **Builds cleanly with ESP-IDF v6.1 for esp32, flashed and running; RGB color order confirmed on the WS2811 string.**
 - Toolchain: `source ~/.espressif/tools/activate_idf_v6.1.sh` (EIM install).
 - `led_strip` is pinned to `^3.0.0` (3.x uses `color_component_format`; 2.x used `led_pixel_format`). Color order is the per-channel wire format (it was `LED_COLOR_FORMAT` in `config.h` until 2026-10-18).
 - `main` requires `esp_driver_rmt` (not the legacy `driver` component).

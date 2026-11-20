@@ -8,7 +8,7 @@
 /* Task stacks (bytes) of the tasks that run programs: the evaluator recurses, up to DSL_MAX_EVAL_DEPTH levels with
  * function calls (DSL_MAX_EVAL_STACK is what the compiler allows them). `stat` shows how much was never used. */
 #define RENDER_STACK        8192
-#define AUTOMATION_STACK    8192
+#define AUTOMATION_STACK    16384    /* more: play compiles the library program from inside the evaluator */
 /* Loops in channel programs must leave the render task time to sleep (on single-core chips nothing else runs while it
  * works): all channels share LOOP_LIMIT_US per frame, and each channel gets at least LOOP_MIN_US. */
 #define LOOP_LIMIT_US       12000
